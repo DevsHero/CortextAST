@@ -21,6 +21,8 @@ pub struct Symbol {
 #[derive(Debug, Clone, Serialize)]
 pub struct FileSymbols {
     pub file: String,
+    pub imports: Vec<String>,
+    pub exports: Vec<String>,
     pub symbols: Vec<Symbol>,
 }
 
@@ -89,6 +91,45 @@ fn node_text<'a>(source: &'a [u8], node: Node) -> &'a str {
     let start = node.start_byte();
     let end = node.end_byte();
     std::str::from_utf8(&source[start..end]).unwrap_or("")
+}
+
+fn strip_string_quotes(s: &str) -> String {
+    let t = s.trim();
+    if t.len() >= 2 {
+        let bytes = t.as_bytes();
+        let first = bytes[0];
+        let last = bytes[t.len() - 1];
+        if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') || (first == b'`' && last == b'`') {
+            return t[1..t.len() - 1].to_string();
+        }
+    }
+    t.to_string()
+}
+
+fn run_query_strings(source: &[u8], root: Node, language: Language, query_src: &str, cap: &str) -> Result<Vec<String>> {
+    let query = Query::new(language, query_src).context("Failed to compile tree-sitter query")?;
+    let mut cursor = QueryCursor::new();
+
+    let mut out: Vec<String> = Vec::new();
+    for m in cursor.matches(&query, root, source) {
+        for cap0 in m.captures {
+            let cap_name = query.capture_names()[cap0.index as usize].as_str();
+            if cap_name != cap {
+                continue;
+            }
+            let text = node_text(source, cap0.node).trim().to_string();
+            if !text.is_empty() {
+                out.push(text);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn dedup_sorted(mut v: Vec<String>) -> Vec<String> {
+    v.sort();
+    v.dedup();
+    v
 }
 
 fn run_query(
@@ -177,9 +218,73 @@ pub fn analyze_file(path: &Path) -> Result<FileSymbols> {
     let root = tree.root_node();
 
     let mut symbols: Vec<Symbol> = Vec::new();
+    let mut imports: Vec<String> = Vec::new();
+    let mut exports: Vec<String> = Vec::new();
 
     // Rust
     if abs.extension().and_then(|e| e.to_str()).unwrap_or("") == "rs" {
+        // Imports: use declarations.
+        // Example node text: `crate::foo::bar` or `std::collections::{HashMap, HashSet}`
+        // We keep the raw path text for now.
+        imports.extend(run_query_strings(
+            source,
+            root,
+            language,
+            r#"(use_declaration argument: (_) @path)"#,
+            "path",
+        )?);
+
+        // Exports: public items (minimal set for architecture mapping).
+        // We intentionally only report the names here; `symbols` remains a full outline.
+        exports.extend(run_query_strings(
+            source,
+            root,
+            language,
+            r#"(
+                function_item
+                                    (visibility_modifier) @vis
+                  name: (identifier) @name
+              )
+              (#match? @vis "^pub")"#,
+            "name",
+        )?);
+        exports.extend(run_query_strings(
+            source,
+            root,
+            language,
+            r#"(
+                struct_item
+                                    (visibility_modifier) @vis
+                  name: (type_identifier) @name
+              )
+              (#match? @vis "^pub")"#,
+            "name",
+        )?);
+        exports.extend(run_query_strings(
+            source,
+            root,
+            language,
+            r#"(
+                enum_item
+                                    (visibility_modifier) @vis
+                  name: (type_identifier) @name
+              )
+              (#match? @vis "^pub")"#,
+            "name",
+        )?);
+        exports.extend(run_query_strings(
+            source,
+            root,
+            language,
+            r#"(
+                trait_item
+                                    (visibility_modifier) @vis
+                  name: (type_identifier) @name
+              )
+              (#match? @vis "^pub")"#,
+            "name",
+        )?);
+
         symbols.extend(run_query(
             source,
             root,
@@ -212,10 +317,59 @@ pub fn analyze_file(path: &Path) -> Result<FileSymbols> {
             "trait",
             false,
         )?);
+
     } else {
         // TypeScript / TSX / JS
         let ext = abs.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
         if ext == "ts" || ext == "tsx" || ext == "js" || ext == "jsx" || ext == "mjs" || ext == "cjs" {
+            // Imports
+            // import ... from "./x";
+            let import_srcs = run_query_strings(
+                source,
+                root,
+                language,
+                r#"(import_statement source: (string) @src)"#,
+                "src",
+            )?;
+            imports.extend(import_srcs.into_iter().map(|s| strip_string_quotes(&s)));
+
+            // Exports (public API)
+            // export function foo() {}
+            exports.extend(run_query_strings(
+                source,
+                root,
+                language,
+                r#"(export_statement declaration: (function_declaration name: (identifier) @name))"#,
+                "name",
+            )?);
+            // export class Foo {}
+            exports.extend(run_query_strings(
+                source,
+                root,
+                language,
+                r#"(export_statement declaration: (class_declaration name: (type_identifier) @name))"#,
+                "name",
+            )?);
+
+            // export const foo = ...
+            exports.extend(run_query_strings(
+                source,
+                root,
+                language,
+                r#"(export_statement declaration: (lexical_declaration (variable_declarator name: (identifier) @name)))"#,
+                "name",
+            )?);
+
+            // export { foo, bar as baz };
+            let export_names = run_query_strings(
+                source,
+                root,
+                language,
+                r#"(export_statement (export_clause (export_specifier name: (identifier) @name)))"#,
+                "name",
+            )?;
+            exports.extend(export_names);
+
             symbols.extend(run_query(
                 source,
                 root,
@@ -276,8 +430,13 @@ pub fn analyze_file(path: &Path) -> Result<FileSymbols> {
     // Stable ordering: by line then name.
     symbols.sort_by(|a, b| a.line.cmp(&b.line).then_with(|| a.name.cmp(&b.name)));
 
+    imports = dedup_sorted(imports);
+    exports = dedup_sorted(exports);
+
     Ok(FileSymbols {
         file: normalize_path_for_output(path),
+        imports,
+        exports,
         symbols,
     })
 }

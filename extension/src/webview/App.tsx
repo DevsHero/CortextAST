@@ -229,6 +229,16 @@ export function App() {
     vscode.postMessage({ command: "focusNode", target: path, budgetTokens, action: "open" });
   };
 
+  const onTogglePrivate = (containerId: string) => {
+    setNodes((prev) =>
+      prev.map((n) => {
+        if (n.id !== containerId) return n;
+        const cur = Boolean((n.data as any)?.showPrivate);
+        return { ...n, data: { ...(n.data as any), showPrivate: !cur } };
+      })
+    );
+  };
+
   const onToggle = (containerId: string) => {
     setNodes((prev) =>
       prev.map((n) => {
@@ -339,7 +349,14 @@ export function App() {
                     ...(n.data as any),
                     loading: false,
                     expanded: true,
-                    children: uiChildren
+                    children: uiChildren,
+                    budgetTokens,
+                    onToggle,
+                    onInspect: onInspectPath,
+                    onExpandFolder: onExpandFolderPath,
+                    onSlice: onSlicePath,
+                    onOpenAt,
+                    onTogglePrivate
                   },
                   style: { ...(n.style as any), zIndex: 1000 }
                 };
@@ -374,7 +391,8 @@ export function App() {
                 onInspect: onInspectPath,
                 onExpandFolder: onExpandFolderPath,
                 onSlice: onSlicePath,
-                onOpenAt
+                onOpenAt,
+                onTogglePrivate
               }
             }))
           );
@@ -401,6 +419,7 @@ export function App() {
 
         const payload = msg.payload as any;
         const symbols = Array.isArray(payload?.symbols) ? (payload.symbols as UiSymbol[]) : [];
+        const exportsList = Array.isArray(payload?.exports) ? (payload.exports as string[]) : [];
         const file = typeof payload?.file === "string" ? payload.file : msg.targetPath;
 
         setNodes((prev) =>
@@ -426,7 +445,16 @@ export function App() {
                 title: file,
                 loading: false,
                 expanded: true,
-                symbols
+                symbols,
+                exports: exportsList,
+                showPrivate: false,
+                budgetTokens,
+                onToggle,
+                onInspect: onInspectPath,
+                onExpandFolder: onExpandFolderPath,
+                onSlice: onSlicePath,
+                onOpenAt,
+                onTogglePrivate
               } satisfies FileNodeData,
               style: { ...(n.style as any), zIndex: 1000 }
             };
@@ -474,6 +502,7 @@ export function App() {
             onExpandFolder: onExpandFolderPath,
             onSlice: onSlicePath,
             onOpenAt
+            ,onTogglePrivate
           }
         }))
       );
@@ -492,6 +521,7 @@ export function App() {
             onExpandFolder: onExpandFolderPath,
             onSlice: onSlicePath,
             onOpenAt
+            ,onTogglePrivate
           }
         }))
       );

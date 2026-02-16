@@ -27,6 +27,8 @@ export type FileNodeData = {
   loading?: boolean;
 
   symbols?: UiSymbol[];
+  exports?: string[];
+  showPrivate?: boolean;
   children?: UiChild[];
 
   budgetTokens?: number;
@@ -36,6 +38,7 @@ export type FileNodeData = {
   onExpandFolder?: (containerId: string, targetPath: string) => void;
   onSlice?: (path: string) => void;
   onOpenAt?: (file: string, line: number) => void;
+  onTogglePrivate?: (containerId: string) => void;
 };
 
 function kindIcon(kind: string): string {
@@ -154,9 +157,39 @@ export function FileNode({ id, data, selected }: NodeProps<FileNodeData>) {
             </div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {/* Smart filter */}
+              {(data.exports ?? []).length ? (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    data.onTogglePrivate?.(id);
+                  }}
+                  style={{
+                    alignSelf: "flex-start",
+                    background: "transparent",
+                    border: "none",
+                    color: "var(--vscode-textLink-foreground)",
+                    cursor: "pointer",
+                    padding: 0,
+                    fontSize: 12
+                  }}
+                  title="Toggle exported-only vs show all symbols"
+                >
+                  {data.showPrivate ? "Show Exports Only" : "Show Private"}
+                </button>
+              ) : null}
+
               {(data.symbols ?? []).length ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 220, overflow: "auto" }}>
-                  {(data.symbols ?? []).slice(0, 60).map((s, idx) => (
+                  {(data.symbols ?? [])
+                    .filter((s) => {
+                      const exports = data.exports ?? [];
+                      if (!exports.length) return true;
+                      if (data.showPrivate) return true;
+                      return exports.includes(s.name);
+                    })
+                    .slice(0, 60)
+                    .map((s, idx) => (
                     <button
                       key={`${s.kind}:${s.name}:${idx}`}
                       onClick={(e) => {
