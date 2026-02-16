@@ -1,35 +1,15 @@
 {
-  "name": "context-slicer",
-  "version": "0.1.0",
+  "name": "context-slicer-monorepo",
+  "private": true,
   "type": "module",
-  "description": "Cross-platform context slicing CLI + MCP server (Repomix + dynamic model token budgets)",
-  "license": "MIT",
-  "engines": {
-    "node": ">=20"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/your-org/context-slicer"
-  },
-  "bin": {
-    "context-slicer": "./src/cli.js",
-    "context-slicer-mcp": "./src/mcp.js"
-  },
   "scripts": {
-    "build:bundle": "node scripts/bundle.mjs",
-    "build:binary": "node scripts/build_binary.mjs",
-    "test:cli": "node src/cli.js focus-auto mixer",
-    "test:binary": "node scripts/test_binary.mjs",
-    "test:mcp-binary": "node scripts/test_mcp_binary.mjs"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "1.26.0",
-    "fast-glob": "3.3.3",
-    "ignore": "7.0.5",
-    "zod": "4.3.6"
+    "build:core": "cd core && CARGO_TARGET_DIR=target cargo build --release",
+    "build:ext": "cd extension && npm run build",
+    "build:all": "npm run build:core && npm run build:ext",
+    "dev": "concurrently -k -n core,ext \"cd core && CARGO_TARGET_DIR=target cargo watch -x 'build --release'\" \"cd extension && npm run watch\"",
+    "copy:bin": "node scripts/copy_core_bin_to_extension.mjs"
   },
   "devDependencies": {
-    "esbuild": "0.27.3",
-    "postject": "1.0.0-alpha.6"
+    "concurrently": "^9.2.1"
   }
 }
