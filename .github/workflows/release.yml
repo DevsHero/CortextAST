@@ -1,0 +1,76 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build single binary
+        run: npm run build:binary
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp dist/context-slicer.exe "release/context-slicer-${{ runner.os }}.exe"
+          else
+            cp dist/context-slicer "release/context-slicer-${{ runner.os }}"
+          fi
+
+      - name: Checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          if command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 * > SHA256SUMS
+          else
+            sha256sum * > SHA256SUMS
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: context-slicer-${{ runner.os }}
+          path: release/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/context-slicer-*
+            artifacts/**/SHA256SUMS

@@ -1,0 +1,4 @@
+node_modules/
+.context-slicer/
+dist/
+.DS_Store

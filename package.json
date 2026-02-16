@@ -1,0 +1,35 @@
+{
+  "name": "context-slicer",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Cross-platform context slicing CLI + MCP server (Repomix + dynamic model token budgets)",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/context-slicer"
+  },
+  "bin": {
+    "context-slicer": "./src/cli.js",
+    "context-slicer-mcp": "./src/mcp.js"
+  },
+  "scripts": {
+    "build:bundle": "node scripts/bundle.mjs",
+    "build:binary": "node scripts/build_binary.mjs",
+    "test:cli": "node src/cli.js focus-auto mixer",
+    "test:binary": "node scripts/test_binary.mjs",
+    "test:mcp-binary": "node scripts/test_mcp_binary.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.26.0",
+    "fast-glob": "3.3.3",
+    "ignore": "7.0.5",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "esbuild": "0.27.3",
+    "postject": "1.0.0-alpha.6"
+  }
+}
