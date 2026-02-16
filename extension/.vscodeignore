@@ -1,0 +1,10 @@
+**/*.ts
+**/*.tsx
+**/*.map
+node_modules/**
+dist-tsc/**
+webview/**
+!dist/webview.js
+!dist/webview.js.map
+!dist/extension.js
+!dist/extension.js.map
