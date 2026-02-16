@@ -5,7 +5,7 @@ import { spawnSlicerXml } from "./spawnSlicer";
 import { spawnInspector } from "./spawnInspector";
 
 type WebviewMessage =
-  | { command: "refreshMap"; budgetTokens?: number; targetPath?: string }
+  | { command: "refreshMap"; budgetTokens?: number; targetPath?: string; mode?: "file-tree" | "module-network" }
   | { command: "focusNode"; target: string; budgetTokens?: number; action?: "open" | "copy" }
   | { command: "inspectNode"; targetPath: string }
   | { command: "openFileAt"; file: string; line: number };
@@ -79,7 +79,8 @@ export function activate(context: vscode.ExtensionContext) {
           if (msg.command === "refreshMap") {
             try {
               post({ type: "STATUS", text: "Mapping workspace..." });
-              const map = await spawnSlicerMap(context.extensionUri, out, msg.targetPath);
+              const mode = msg.mode === "module-network" ? "module-network" : "file-tree";
+              const map = await spawnSlicerMap(context.extensionUri, out, msg.targetPath, mode);
               out.appendLine(`[refreshMap] map nodes=${map.nodes?.length ?? 0} edges=${map.edges?.length ?? 0}`);
               post({ type: "UPDATE_GRAPH", payload: map });
               post({ type: "STATUS", text: "Ready" });

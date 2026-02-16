@@ -7,7 +7,9 @@
   "engines": {
     "vscode": "^1.90.0"
   },
-  "categories": ["Other"],
+  "categories": [
+    "Other"
+  ],
   "main": "./dist/extension.js",
   "activationEvents": [
     "onCommand:anvilHolo.open",
@@ -37,22 +39,27 @@
   "devDependencies": {
     "@testing-library/jest-dom": "^6.8.0",
     "@testing-library/react": "^16.3.0",
-    "@types/node": "^22.13.1",
+    "@types/d3-force": "^3.0.10",
     "@types/dagre": "^0.7.53",
-    "@types/vscode": "^1.90.0",
+    "@types/node": "^22.13.1",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
+    "@types/vscode": "^1.90.0",
+    "@vscode/test-electron": "^2.4.1",
     "esbuild": "^0.27.3",
     "jsdom": "^26.1.0",
     "typescript": "^5.7.3",
-    "@vscode/test-electron": "^2.4.1",
     "vitest": "^3.2.4"
   },
   "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
+    "d3-dispatch": "^3.0.1",
+    "d3-force": "^3.0.0",
+    "d3-quadtree": "^3.0.1",
+    "d3-timer": "^3.0.1",
     "dagre": "^0.8.5",
     "lucide-react": "^0.539.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "reactflow": "^11.11.4"
   }
 }

@@ -8,6 +8,13 @@ export type RepoMap = {
   edges: Array<{ id: string; source: string; target: string }>;
 };
 
+export type ModuleGraph = {
+  nodes: Array<{ id: string; label: string; path: string; file_count: number; bytes: number; est_tokens: number }>;
+  edges: Array<{ id: string; source: string; target: string; weight: number }>;
+};
+
+export type MapMode = "file-tree" | "module-network";
+
 function slicerBinName(): string {
   return process.platform === "win32" ? "context-slicer.exe" : "context-slicer";
 }
@@ -40,7 +47,9 @@ export async function spawnSlicerMap(
   extensionUri: vscode.Uri,
   outputChannel?: vscode.OutputChannel,
   targetPath?: string
-): Promise<RepoMap> {
+  ,
+  mode: MapMode = "file-tree"
+): Promise<RepoMap | ModuleGraph> {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) throw new Error("No workspace folder open");
 
@@ -48,7 +57,7 @@ export async function spawnSlicerMap(
   const extensionRoot = extensionUri.fsPath;
   const bin = findSlicerBinary(workspaceRoot, extensionRoot);
 
-  const args = ["--map"] as string[];
+  const args = (mode === "module-network" ? ["--graph-modules"] : ["--map"]) as string[];
   if (typeof targetPath === "string" && targetPath.length) {
     args.push(targetPath);
   }
@@ -72,7 +81,8 @@ export async function spawnSlicerMap(
       } catch {
         // ignore
       }
-      reject(new Error(`context-slicer --map timed out after ${timeoutMs}ms (bin=${bin}, cwd=${workspaceRoot})`));
+      const sub = mode === "module-network" ? "--graph-modules" : "--map";
+      reject(new Error(`context-slicer ${sub} timed out after ${timeoutMs}ms (bin=${bin}, cwd=${workspaceRoot})`));
     }, timeoutMs);
 
     cp.stdout.setEncoding("utf8");
@@ -99,21 +109,19 @@ export async function spawnSlicerMap(
         if (stderr) outputChannel.appendLine(`[spawnSlicerMap] full stderr: ${stderr}`);
       }
       if (code === 0) return resolve(stdout);
-      reject(new Error(`context-slicer --map failed (code ${code}) (bin=${bin}, cwd=${workspaceRoot}): ${stderr || stdout}`));
+      const sub = mode === "module-network" ? "--graph-modules" : "--map";
+      reject(new Error(`context-slicer ${sub} failed (code ${code}) (bin=${bin}, cwd=${workspaceRoot}): ${stderr || stdout}`));
     });
   });
 
   if (!jsonText.trim().length) {
-    throw new Error(`context-slicer --map returned empty stdout (bin=${bin}, cwd=${workspaceRoot})`);
+    const sub = mode === "module-network" ? "--graph-modules" : "--map";
+    throw new Error(`context-slicer ${sub} returned empty stdout (bin=${bin}, cwd=${workspaceRoot})`);
   }
 
-  const parsed = JSON.parse(jsonText) as RepoMap;
+  const parsed = JSON.parse(jsonText) as any;
   if (!parsed || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
-    throw new Error(`Invalid --map JSON output (first 200 chars): ${jsonText.slice(0, 200)}`);
+    throw new Error(`Invalid map JSON output (first 200 chars): ${jsonText.slice(0, 200)}`);
   }
-  if (parsed.nodes.length === 0) {
-    // Not an error, but helps debug "blank map" situations.
-    // Caller will still render empty.
-  }
-  return parsed;
+  return parsed as RepoMap | ModuleGraph;
 }

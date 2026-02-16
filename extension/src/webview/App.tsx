@@ -14,10 +14,17 @@ import {
 } from "lucide-react";
 
 import { FileNode, type FileNodeData, type UiChild, type UiSymbol } from "./FileNode";
+import { ModuleNode } from "./ModuleNode";
+import { useForceLayout } from "./hooks/useForceLayout";
 
 type RustMap = {
   nodes: Array<{ id: string; label?: string; path?: string; size_class?: string; est_tokens?: number }>;
   edges: Array<{ source: string; target: string; id?: string }>;
+};
+
+type ModuleGraph = {
+  nodes: Array<{ id: string; label: string; path: string; file_count: number; bytes: number; est_tokens: number }>;
+  edges: Array<{ id: string; source: string; target: string; weight: number }>;
 };
 
 type ExtensionMessage =
@@ -208,6 +215,8 @@ export function App() {
   const [layoutDir, setLayoutDir] = useState<"LR" | "TB">("LR");
   const [lastMap, setLastMap] = useState<RustMap | null>(null);
 
+  const [viewMode, setViewMode] = useState<"files" | "modules">("files");
+
   const [search, setSearch] = useState<string>("");
 
   const [winSize, setWinSize] = useState<{ w: number; h: number }>(() => ({
@@ -315,6 +324,17 @@ export function App() {
     vscode.postMessage({ command: "refreshMap", budgetTokens, targetPath });
   };
 
+  const onToggleView = () => {
+    setViewMode((m) => (m === "files" ? "modules" : "files"));
+  };
+
+  useForceLayout({
+    enabled: viewMode === "modules",
+    nodes,
+    edges,
+    setNodes
+  });
+
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
       const msg = event.data as ExtensionMessage;
@@ -326,6 +346,36 @@ export function App() {
           });
           const scope = mapScopeInFlight.current;
           mapScopeInFlight.current = null;
+
+          // Module network view: replace nodes/edges and let force layout place them.
+          if (viewMode === "modules") {
+            const g = msg.payload as ModuleGraph;
+            const moduleNodes: Node[] = (g.nodes ?? []).map((n) => ({
+              id: n.id,
+              type: "module",
+              position: { x: 0, y: 0 },
+              data: {
+                label: n.label,
+                fileCount: n.file_count,
+                estTokens: n.est_tokens,
+                title: n.path
+              },
+              style: { zIndex: 0 }
+            }));
+            const moduleEdges: Edge[] = (g.edges ?? []).map((e) => ({
+              id: e.id,
+              source: e.source,
+              target: e.target,
+              // carry weight through for force distance
+              ...(e.weight ? ({ weight: e.weight } as any) : {})
+            }));
+
+            setNodes(moduleNodes);
+            setEdges(moduleEdges);
+            setIsRefreshing(false);
+            setStatus("Ready");
+            return;
+          }
 
           // Scoped folder expansion: populate node.children instead of adding nodes.
           if (scope) {
@@ -476,9 +526,19 @@ export function App() {
     };
 
     window.addEventListener("message", onMessage);
-    vscode.postMessage({ command: "refreshMap", budgetTokens });
+    vscode.postMessage({ command: "refreshMap", budgetTokens, mode: "file-tree" });
     return () => window.removeEventListener("message", onMessage);
   }, []);
+
+  useEffect(() => {
+    // Switch data source when view mode changes.
+    if (viewMode === "modules") {
+      setLastMap(null);
+      vscode.postMessage({ command: "refreshMap", budgetTokens, mode: "module-network", targetPath: "." });
+    } else {
+      vscode.postMessage({ command: "refreshMap", budgetTokens, mode: "file-tree" });
+    }
+  }, [viewMode, budgetTokens]);
 
   useEffect(() => {
     const onResize = () => setWinSize({ w: window.innerWidth, h: window.innerHeight });
@@ -488,6 +548,7 @@ export function App() {
 
   useEffect(() => {
     // Re-layout when the layout direction changes.
+    if (viewMode === "modules") return;
     if (!lastMap) return;
     try {
       const graph = layoutWithDagreDir(lastMap, layoutDir);
@@ -734,7 +795,7 @@ export function App() {
           panOnScroll={true}
           zoomOnScroll={true}
           zoomOnPinch={true}
-          nodeTypes={{ file: FileNode, directory: FileNode }}
+          nodeTypes={{ file: FileNode, directory: FileNode, module: ModuleNode }}
         >
           <Background />
           <Controls />
@@ -793,6 +854,14 @@ export function App() {
         </button>
         <button onClick={() => setSettingsOpen(true)} style={toolbarButtonStyle} title="Settings">
           <Settings size={18} />
+        </button>
+
+        <button
+          onClick={onToggleView}
+          style={toolbarButtonStyle}
+          title={viewMode === "files" ? "View: Files" : "View: Modules"}
+        >
+          <span style={{ fontSize: 12, fontWeight: 800 }}>{viewMode === "files" ? "F" : "M"}</span>
         </button>
         <button
           onClick={onCopyXml}
