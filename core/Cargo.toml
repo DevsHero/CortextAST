@@ -11,6 +11,7 @@ ignore = "0.4"
 tokio = { version = "1.0", features = ["full"] }
 anyhow = "1.0"
 quick-xml = "0.31"
+toml = "0.8"
 
 # Deep-dive inspection (symbol extraction)
 tree-sitter = "0.20"

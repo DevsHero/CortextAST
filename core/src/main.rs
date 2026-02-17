@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use context_slicer::config::load_config;
 use context_slicer::inspector::analyze_file;
-use context_slicer::mapper::{build_module_graph, build_repo_map, build_repo_map_scoped};
+use context_slicer::mapper::{build_map_from_manifests, build_module_graph, build_repo_map, build_repo_map_scoped};
 use context_slicer::slicer::slice_to_xml;
 use serde_json::json;
 use std::io::{BufRead, Write};
@@ -20,6 +20,11 @@ struct Cli {
     /// Output a high-level module dependency graph (nodes=modules, edges=imports). Optional ROOT scopes scanning.
     #[arg(long, value_name = "ROOT", num_args = 0..=1, default_missing_value = ".")]
     graph_modules: Option<PathBuf>,
+
+    /// Build a module graph strictly from the directories containing these manifest files.
+    /// Example: --manifests apps/a/package.json libs/b/Cargo.toml
+    #[arg(long, num_args = 1.., value_name = "MANIFEST_PATHS")]
+    manifests: Option<Vec<PathBuf>>,
 
     /// Optional subdirectory path to scope mapping (only valid with --map)
     #[arg(value_name = "SUBDIR_PATH", requires = "map")]
@@ -59,6 +64,12 @@ fn main() -> Result<()> {
     }
 
     let repo_root = std::env::current_dir().context("Failed to get current dir")?;
+
+    if let Some(manifests) = cli.manifests.as_ref() {
+        let graph = build_map_from_manifests(&repo_root, manifests)?;
+        println!("{}", serde_json::to_string(&graph)?);
+        return Ok(());
+    }
 
     if let Some(root) = cli.graph_modules.as_ref() {
         let graph = build_module_graph(&repo_root, root)?;

@@ -1,11 +1,62 @@
 import * as vscode from "vscode";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { spawnSlicerMap } from "./spawnMap";
 import { spawnSlicerXml } from "./spawnSlicer";
 import { spawnInspector } from "./spawnInspector";
+import { discoverModules, type DiscoveredModule } from "./discovery";
+
+async function resolveInspectTarget(workspaceRoot: string, targetPath: string): Promise<string> {
+  const raw = String(targetPath || "").trim().replace(/\\/g, "/");
+  if (!raw) return raw;
+
+  const abs = isAbsolute(raw) ? raw : join(workspaceRoot, raw);
+  let stat: vscode.FileStat | undefined;
+  try {
+    stat = await vscode.workspace.fs.stat(vscode.Uri.file(abs));
+  } catch {
+    // If it doesn't exist, let the inspector error explain.
+    return raw;
+  }
+
+  const isDir = (stat.type & vscode.FileType.Directory) === vscode.FileType.Directory;
+  if (!isDir) return raw;
+
+  // Directory drill-down: pick a reasonable entry file.
+  const candidatesAbs: string[] = [
+    join(abs, "src", "lib.rs"),
+    join(abs, "src", "main.rs"),
+    join(abs, "lib.rs"),
+    join(abs, "main.rs"),
+    join(abs, "src", "index.ts"),
+    join(abs, "src", "index.tsx"),
+    join(abs, "src", "index.js"),
+    join(abs, "src", "index.jsx"),
+    join(abs, "index.ts"),
+    join(abs, "index.tsx"),
+    join(abs, "index.js"),
+    join(abs, "index.jsx")
+  ];
+
+  for (const candAbs of candidatesAbs) {
+    try {
+      const st = await vscode.workspace.fs.stat(vscode.Uri.file(candAbs));
+      const isFile = (st.type & vscode.FileType.File) === vscode.FileType.File;
+      if (!isFile) continue;
+
+      const rel = relative(workspaceRoot, candAbs).replace(/\\/g, "/");
+      return rel.startsWith("../") ? candAbs : rel;
+    } catch {
+      // continue
+    }
+  }
+
+  // Fallback: inspect the directory path (will likely error, but with context).
+  return raw;
+}
 
 type WebviewMessage =
-  | { command: "refreshMap"; budgetTokens?: number; targetPath?: string; mode?: "file-tree" | "module-network" }
+  | { command: "refreshMap"; manifests?: string[]; budgetTokens?: number; targetPath?: string; mode?: "file-tree" | "module-network" }
+  | { command: "webviewReady" }
   | { command: "focusNode"; target: string; budgetTokens?: number; action?: "open" | "copy" }
   | { command: "inspectNode"; targetPath: string }
   | { command: "openFileAt"; file: string; line: number };
@@ -13,6 +64,8 @@ type WebviewMessage =
 type ExtensionMessage =
   | { type: "UPDATE_GRAPH"; payload: any }
   | { type: "STATUS"; text: string }
+  | { type: "AVAILABLE_MODULES"; modules: DiscoveredModule[] }
+  | { type: "ADD_MODULE"; path: string }
   | { type: "INSPECT_RESULT"; ok: boolean; targetPath: string; payload?: any; error?: string }
   | {
       type: "SLICE_RESULT";
@@ -25,9 +78,17 @@ type ExtensionMessage =
       error?: string;
     };
 
-export function activate(context: vscode.ExtensionContext) {
+export type AnvilHoloApi = {
+  spawnSlicerMap: typeof spawnSlicerMap;
+};
+
+export function activate(context: vscode.ExtensionContext): AnvilHoloApi {
   const out = vscode.window.createOutputChannel("AnvilHolo", { log: true });
   out.appendLine("[activate] AnvilHolo activated");
+
+  let activePanel: vscode.WebviewPanel | null = null;
+  let activePanelReady = false;
+  let pendingAddModules: string[] = [];
 
   context.subscriptions.push(
     vscode.commands.registerCommand("anvilHolo.debugWrite", async () => {
@@ -68,19 +129,51 @@ export function activate(context: vscode.ExtensionContext) {
         }
       );
 
+      activePanel = panel;
+      activePanelReady = false;
+      pendingAddModules = [];
+      panel.onDidDispose(() => {
+        if (activePanel === panel) activePanel = null;
+      });
+
       panel.webview.html = getWebviewHtml(panel.webview, context.extensionUri);
 
       const post = (msg: ExtensionMessage) => panel.webview.postMessage(msg);
+
+      // Discovery runs immediately on open; send results once the webview is ready.
+      let discoveredModules: DiscoveredModule[] = [];
+      try {
+        discoveredModules = await discoverModules();
+        out.appendLine(`[discoverModules] found=${discoveredModules.length}`);
+      } catch (e: any) {
+        out.appendLine(`[discoverModules] ERROR: ${e?.message || String(e)}`);
+      }
 
       panel.webview.onDidReceiveMessage(
         async (msg: WebviewMessage) => {
           out.appendLine(`[webview->ext] ${JSON.stringify(msg)}`);
 
+          if (msg.command === "webviewReady") {
+            activePanelReady = true;
+            post({ type: "AVAILABLE_MODULES", modules: discoveredModules });
+            if (pendingAddModules.length) {
+              for (const p of pendingAddModules) {
+                post({ type: "ADD_MODULE", path: p });
+              }
+              pendingAddModules = [];
+            }
+            post({ type: "STATUS", text: "Ready" });
+            return;
+          }
+
           if (msg.command === "refreshMap") {
             try {
-              post({ type: "STATUS", text: "Mapping workspace..." });
+              const manifests = Array.isArray((msg as any).manifests)
+                ? (msg as any).manifests.map((p: any) => String(p || "")).filter((p: string) => p.trim().length)
+                : undefined;
+              post({ type: "STATUS", text: manifests?.length ? "Mapping selected modules..." : "Mapping workspace..." });
               const mode = msg.mode === "module-network" ? "module-network" : "file-tree";
-              const map = await spawnSlicerMap(context.extensionUri, out, msg.targetPath, mode);
+              const map = await spawnSlicerMap(context.extensionUri, out, msg.targetPath, mode, manifests);
               out.appendLine(`[refreshMap] map nodes=${map.nodes?.length ?? 0} edges=${map.edges?.length ?? 0}`);
               post({ type: "UPDATE_GRAPH", payload: map });
               post({ type: "STATUS", text: "Ready" });
@@ -148,8 +241,20 @@ export function activate(context: vscode.ExtensionContext) {
           if (msg.command === "inspectNode") {
             try {
               post({ type: "STATUS", text: `Inspecting: ${msg.targetPath}` });
-              const inspected = await spawnInspector(context.extensionUri, msg.targetPath, { outputChannel: out });
-              post({ type: "INSPECT_RESULT", ok: true, targetPath: msg.targetPath, payload: inspected });
+              const folder = vscode.workspace.workspaceFolders?.[0];
+              if (!folder) throw new Error("No workspace folder open");
+              const workspaceRoot = folder.uri.fsPath;
+
+              const resolvedTarget = await resolveInspectTarget(workspaceRoot, msg.targetPath);
+              out.appendLine(`[inspectNode] resolvedTarget=${resolvedTarget}`);
+
+              const inspected = await spawnInspector(context.extensionUri, resolvedTarget, { outputChannel: out });
+              post({
+                type: "INSPECT_RESULT",
+                ok: true,
+                targetPath: msg.targetPath,
+                payload: { ...inspected, resolvedTarget }
+              });
               post({ type: "STATUS", text: "Ready" });
             } catch (e: any) {
               const errText = e?.message || String(e);
@@ -189,6 +294,62 @@ export function activate(context: vscode.ExtensionContext) {
       );
     })
   );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("anvilHolo.addToGraph", async (resource?: vscode.Uri) => {
+      out.appendLine("[command] anvilHolo.addToGraph");
+      try {
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        if (!folder) throw new Error("No workspace folder open");
+
+        const workspaceRoot = folder.uri.fsPath;
+        const baseUri = resource ?? vscode.window.activeTextEditor?.document?.uri;
+        if (!baseUri) throw new Error("No folder resource provided");
+
+        // Find the module manifest inside the clicked folder.
+        const candidates = ["package.json", "Cargo.toml", "pubspec.yaml", "go.mod"];
+        let manifestUri: vscode.Uri | null = null;
+        for (const name of candidates) {
+          const u = vscode.Uri.joinPath(baseUri, name);
+          try {
+            await vscode.workspace.fs.stat(u);
+            manifestUri = u;
+            break;
+          } catch {
+            // continue
+          }
+        }
+        if (!manifestUri) {
+          vscode.window.showWarningMessage("AnvilHolo: No manifest found in that folder (package.json/Cargo.toml/pubspec.yaml/go.mod)");
+          return;
+        }
+
+        const rel = vscode.workspace.asRelativePath(manifestUri, false).replace(/\\/g, "/");
+
+        // Ensure panel is open.
+        if (!activePanel) {
+          await vscode.commands.executeCommand("anvilHolo.open");
+        }
+        if (!activePanel) {
+          throw new Error("Failed to open AnvilHolo panel");
+        }
+
+        if (!activePanelReady) {
+          pendingAddModules = Array.from(new Set([...pendingAddModules, rel]));
+        } else {
+          activePanel.webview.postMessage({ type: "ADD_MODULE", path: rel } satisfies ExtensionMessage);
+        }
+        vscode.window.showInformationMessage(`✅ AnvilHolo: Added ${rel}`);
+      } catch (e: any) {
+        const errText = e?.message || String(e);
+        out.appendLine(`[addToGraph] ERROR: ${errText}`);
+        vscode.window.showErrorMessage(`AnvilHolo addToGraph failed: ${errText}`);
+      }
+    })
+  );
+
+  // Expose a minimal internal API for integration tests.
+  return { spawnSlicerMap };
 }
 
 export function deactivate() {}

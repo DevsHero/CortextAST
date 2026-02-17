@@ -6,6 +6,7 @@ type ForceNode = {
   id: string;
   x?: number;
   y?: number;
+  r?: number;
 };
 
 type ForceLink = {
@@ -36,7 +37,10 @@ export function useForceLayout(opts: {
     const simNodes: ForceNode[] = opts.nodes.map((n) => ({
       id: n.id,
       x: Number.isFinite((n.position as any)?.x) ? (n.position as any).x : undefined,
-      y: Number.isFinite((n.position as any)?.y) ? (n.position as any).y : undefined
+      y: Number.isFinite((n.position as any)?.y) ? (n.position as any).y : undefined,
+      r: Number.isFinite((n.data as any)?.sizePx)
+        ? Math.max(30, Math.min(80, Number((n.data as any).sizePx) / 2))
+        : 60
     }));
 
     const simLinks: ForceLink[] = opts.edges.map((e: any) => ({
@@ -46,20 +50,22 @@ export function useForceLayout(opts: {
     }));
 
     const sim = forceSimulation(simNodes as any)
-      .force("charge", forceManyBody().strength(-500))
+      .force("charge", forceManyBody().strength(-1000))
       .force(
         "link",
         forceLink(simLinks as any)
           .id((d: any) => d.id)
-          .distance((l: any) => {
-            const w = typeof l.weight === "number" ? l.weight : 1;
-            // Higher weight => tighter distance.
-            return Math.max(60, 160 - Math.min(100, w * 10));
-          })
+          .distance(150)
           .strength(0.8)
       )
       .force("center", forceCenter(0, 0))
-      .force("collide", forceCollide(70).iterations(2));
+      .force(
+        "collide",
+        forceCollide((d: any) => {
+          const r = typeof d.r === "number" ? d.r : 60;
+          return r + 20;
+        }).iterations(2)
+      );
 
     // Run synchronously; do NOT animate every tick.
     for (let i = 0; i < ticks; i++) sim.tick();

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactFlow, { Background, Controls, Edge, Node, ReactFlowInstance } from "reactflow";
+import { MarkerType } from "reactflow";
 import "reactflow/dist/style.css";
 import { getVsCodeApi } from "./vscode";
 import dagre from "dagre";
@@ -16,6 +17,7 @@ import {
 import { FileNode, type FileNodeData, type UiChild, type UiSymbol } from "./FileNode";
 import { ModuleNode } from "./ModuleNode";
 import { useForceLayout } from "./hooks/useForceLayout";
+import { NetworkEdge } from "./NetworkEdge";
 
 type RustMap = {
   nodes: Array<{ id: string; label?: string; path?: string; size_class?: string; est_tokens?: number }>;
@@ -30,6 +32,8 @@ type ModuleGraph = {
 type ExtensionMessage =
   | { type: "UPDATE_GRAPH"; payload: RustMap }
   | { type: "STATUS"; text: string }
+  | { type: "AVAILABLE_MODULES"; modules: Array<{ path: string; type: "npm" | "cargo" | "dart" | "go" }> }
+  | { type: "ADD_MODULE"; path: string }
   | { type: "INSPECT_RESULT"; ok: boolean; targetPath: string; payload?: any; error?: string }
   | {
       type: "SLICE_RESULT";
@@ -203,6 +207,12 @@ export function App() {
   const [status, setStatus] = useState<string>("Initializing...");
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
 
+  const [availableModules, setAvailableModules] = useState<Array<{ path: string; type: "npm" | "cargo" | "dart" | "go" }>>([]);
+  const [selectedModules, setSelectedModules] = useState<string[]>([]);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
+
+  const selectedModulesRef = useRef<string[]>([]);
+
   const [rf, setRf] = useState<ReactFlowInstance | null>(null);
 
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -215,7 +225,8 @@ export function App() {
   const [layoutDir, setLayoutDir] = useState<"LR" | "TB">("LR");
   const [lastMap, setLastMap] = useState<RustMap | null>(null);
 
-  const [viewMode, setViewMode] = useState<"files" | "modules">("files");
+  const [viewMode, setViewMode] = useState<"files" | "modules">("modules");
+  const viewModeRef = useRef(viewMode);
 
   const [search, setSearch] = useState<string>("");
 
@@ -228,6 +239,69 @@ export function App() {
   const inspectInFlight = useRef<Set<string>>(new Set());
   const mapScopeInFlight = useRef<{ containerId: string; targetPath: string } | null>(null);
   const inspectScopeInFlight = useRef<{ containerId: string; targetPath: string } | null>(null);
+
+  // Telemetry bridge: logs from UI -> Extension Output channel.
+  // (The extension logs every webview->ext message as JSON.)
+  const logToExt = (msg: string) => {
+    try {
+      vscode.postMessage({ type: "STATUS", text: `[UI-LOG] ${msg}` });
+    } catch {
+      // ignore
+    }
+  };
+
+  // When we force a module-network scan, suppress any stale file-tree refreshes
+  // for a short window to prevent race-condition overwrites.
+  const suppressFileTreeUntilMs = useRef<number>(0);
+  const lastRefreshSig = useRef<{ sig: string; at: number }>({ sig: "", at: 0 });
+  const fileTreeAutoRefreshEnabledRef = useRef<boolean>(false);
+
+  const postRefreshMap = (payload: {
+    mode: "file-tree" | "module-network";
+    manifests?: string[];
+    targetPath?: string;
+    budgetTokens?: number;
+  }) => {
+    const now = Date.now();
+
+    // IMPORTANT: if UI is forcing module-network, suppress any file-tree refreshes
+    // immediately (even if we end up deduping the module-network send).
+    if (payload.mode === "module-network") {
+      suppressFileTreeUntilMs.current = Math.max(suppressFileTreeUntilMs.current, now + 1000);
+    }
+
+    const sig = JSON.stringify({
+      mode: payload.mode,
+      manifests: payload.manifests ?? [],
+      targetPath: payload.targetPath ?? "",
+      budgetTokens: payload.budgetTokens ?? null
+    });
+
+    // Deduplicate rapid duplicate sends (effects + handlers can overlap).
+    if (lastRefreshSig.current.sig === sig && now - lastRefreshSig.current.at < 250) {
+      logToExt(`Skipping duplicate refreshMap (${payload.mode})`);
+      return;
+    }
+    lastRefreshSig.current = { sig, at: now };
+
+    if (payload.mode === "file-tree" && now < suppressFileTreeUntilMs.current) {
+      logToExt("Suppressed stale file-tree refreshMap (recent forced module-network)");
+      return;
+    }
+
+    logToExt(
+      `Sending refreshMap mode=${payload.mode}` +
+        (payload.manifests?.length ? ` manifests=${payload.manifests.join(",")}` : "") +
+        (payload.targetPath ? ` target=${payload.targetPath}` : "")
+    );
+    vscode.postMessage({
+      command: "refreshMap",
+      mode: payload.mode,
+      manifests: payload.manifests,
+      targetPath: payload.targetPath,
+      budgetTokens: payload.budgetTokens
+    });
+  };
 
   const onOpenAt = (file: string, line: number) => {
     console.log("[AnvilHolo] openFileAt", { file, line });
@@ -321,11 +395,83 @@ export function App() {
       })
     );
 
-    vscode.postMessage({ command: "refreshMap", budgetTokens, targetPath });
+    postRefreshMap({ mode: "file-tree", budgetTokens, targetPath });
   };
 
   const onToggleView = () => {
-    setViewMode((m) => (m === "files" ? "modules" : "files"));
+    const next = viewModeRef.current === "files" ? "modules" : "files";
+    viewModeRef.current = next;
+    setViewMode(next);
+
+    if (next === "files") {
+      // Only after an explicit user action do we allow auto-refreshing file-tree.
+      fileTreeAutoRefreshEnabledRef.current = true;
+      logToExt("Manual switch to File Tree View");
+      setIsRefreshing(true);
+      setStatus("Mapping workspace...");
+      postRefreshMap({ mode: "file-tree", budgetTokens });
+      return;
+    }
+
+    // Safety net: when the user manually switches to module view, make sure we
+    // actually request the manifest-driven scan (and include the manifests list).
+    if (next === "modules") {
+      const manifests = selectedModulesRef.current;
+      if (manifests.length) {
+        logToExt("Manual switch to Network View; forcing manifest scan");
+        setIsRefreshing(true);
+        setStatus("Mapping selected modules...");
+        postRefreshMap({ mode: "module-network", manifests, budgetTokens });
+      }
+    }
+  };
+
+  useEffect(() => {
+    viewModeRef.current = viewMode;
+  }, [viewMode]);
+
+  useEffect(() => {
+    selectedModulesRef.current = selectedModules;
+  }, [selectedModules]);
+
+  const refreshSelectedModules = (manifests: string[], opts?: { force?: boolean }) => {
+    const uniq = Array.from(new Set((manifests || []).map((p) => String(p || "").trim()).filter(Boolean)));
+    setSelectedModules(uniq);
+
+    // REAL FIX: do not rely on async React state for mode switching.
+    // If manifests are selected, force Modules view immediately and dispatch with explicit mode.
+    if (uniq.length) {
+      logToExt("refreshSelectedModules: forcing NETWORK mode dispatch");
+      viewModeRef.current = "modules";
+      setViewMode("modules");
+      setSidebarCollapsed(false);
+    }
+
+    const canRun = opts?.force || viewModeRef.current === "modules";
+    if (!canRun) return;
+    if (!uniq.length) {
+      setNodes([]);
+      setEdges([]);
+      setLastMap(null);
+      setIsRefreshing(false);
+      setStatus("Ready");
+      return;
+    }
+
+    setIsRefreshing(true);
+    setStatus("Mapping selected modules...");
+    postRefreshMap({ mode: "module-network", manifests: uniq, budgetTokens });
+  };
+
+  const clearCanvas = () => {
+    setNodes([]);
+    setEdges([]);
+    setLastMap(null);
+    setSelectedNodeId(null);
+    setSelectedEstTokens(null);
+    setSelectedModules([]);
+    setIsRefreshing(false);
+    setStatus("Ready");
   };
 
   useForceLayout({
@@ -338,27 +484,132 @@ export function App() {
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
       const msg = event.data as ExtensionMessage;
+      if (msg.type === "AVAILABLE_MODULES") {
+        setAvailableModules(Array.isArray((msg as any).modules) ? (msg as any).modules : []);
+        setStatus("Ready");
+        return;
+      }
+      if (msg.type === "ADD_MODULE") {
+        const p = String((msg as any).path || "").trim().replace(/\\/g, "/");
+        if (!p) return;
+
+        // Prime suppression immediately to prevent any stale file-tree refresh
+        // from firing during the same tick.
+        suppressFileTreeUntilMs.current = Math.max(suppressFileTreeUntilMs.current, Date.now() + 1000);
+
+        const lower = p.toLowerCase();
+        const guessType = lower.endsWith("/cargo.toml")
+          ? "cargo"
+          : lower.endsWith("/pubspec.yaml")
+            ? "dart"
+            : lower.endsWith("/go.mod")
+              ? "go"
+              : "npm";
+
+        setAvailableModules((prev) => {
+          if (prev.some((m) => m.path === p)) return prev;
+          return [...prev, { path: p, type: guessType }].sort((a, b) => a.path.localeCompare(b.path));
+        });
+
+        // CRITICAL: This must immediately switch the UI to module view AND
+        // immediately request a manifest-driven scan with the full list.
+        logToExt(`Adding module ${p}, forcing switch to NETWORK mode`);
+        viewModeRef.current = "modules";
+        setViewMode("modules");
+        setSidebarCollapsed(false);
+
+        const updatedSet = new Set<string>(selectedModulesRef.current);
+        updatedSet.add(p);
+        const manifests = Array.from(updatedSet);
+
+        // Keep state/ref in sync immediately to avoid races with viewModeRef in UPDATE_GRAPH.
+        selectedModulesRef.current = manifests;
+        setSelectedModules(manifests);
+
+        setIsRefreshing(true);
+        setStatus("Mapping selected modules...");
+        postRefreshMap({ mode: "module-network", manifests, budgetTokens });
+        return;
+      }
       if (msg.type === "UPDATE_GRAPH") {
         try {
           console.log("[AnvilHolo] UPDATE_GRAPH", {
             nodes: msg.payload?.nodes?.length,
             edges: msg.payload?.edges?.length
           });
+
+          // Data guard: if we receive a module graph payload while the UI is in file view,
+          // auto-switch so the data is rendered correctly.
+          const looksLikeModuleGraph =
+            Array.isArray((msg.payload as any)?.nodes) &&
+            // IMPORTANT: file-tree nodes also have bytes/est_tokens.
+            // ModuleGraph is uniquely identified by `file_count`.
+            (msg.payload as any).nodes.some((n: any) => typeof n?.file_count === "number");
+          if (looksLikeModuleGraph && viewModeRef.current !== "modules") {
+            console.log("[AnvilHolo] Auto-switching to Network View based on payload shape");
+            viewModeRef.current = "modules";
+            setViewMode("modules");
+            setSidebarCollapsed(false);
+          }
           const scope = mapScopeInFlight.current;
           mapScopeInFlight.current = null;
 
           // Module network view: replace nodes/edges and let force layout place them.
-          if (viewMode === "modules") {
+          if (viewModeRef.current === "modules" || looksLikeModuleGraph) {
             const g = msg.payload as ModuleGraph;
-            const moduleNodes: Node[] = (g.nodes ?? []).map((n) => ({
+
+            const statsById = new Map<string, { inCount: number; outCount: number; inWeight: number; outWeight: number }>();
+            for (const n of g.nodes ?? []) {
+              statsById.set(n.id, { inCount: 0, outCount: 0, inWeight: 0, outWeight: 0 });
+            }
+            for (const e of g.edges ?? []) {
+              const w = typeof e.weight === "number" ? e.weight : 1;
+              const s = statsById.get(e.source);
+              if (s) {
+                s.outCount += 1;
+                s.outWeight += w;
+              }
+              const t = statsById.get(e.target);
+              if (t) {
+                t.inCount += 1;
+                t.inWeight += w;
+              }
+            }
+
+            const minSize = 60;
+            const maxSize = 150;
+            const sizes = (g.nodes ?? []).map((n) => Math.max(1, n.est_tokens ?? 1));
+            const maxTok = sizes.length ? Math.max(...sizes) : 1;
+
+            const moduleNodes: Node[] = (g.nodes ?? []).map((n, idx) => ({
               id: n.id,
-              type: "module",
-              position: { x: 0, y: 0 },
+              type: "moduleNode",
+              // IMPORTANT: seed non-overlapping positions.
+              // With 0 edges, force layout can leave nodes stacked at the same coordinate.
+              position: {
+                x: (g.nodes?.length ?? 0) <= 1 ? 0 : (idx % 4) * 320,
+                y: (g.nodes?.length ?? 0) <= 1 ? 0 : Math.floor(idx / 4) * 260
+              },
               data: {
                 label: n.label,
                 fileCount: n.file_count,
                 estTokens: n.est_tokens,
-                title: n.path
+                inCount: statsById.get(n.id)?.inCount ?? 0,
+                outCount: statsById.get(n.id)?.outCount ?? 0,
+                inWeight: statsById.get(n.id)?.inWeight ?? 0,
+                outWeight: statsById.get(n.id)?.outWeight ?? 0,
+                path: n.path,
+                expanded: false,
+                loading: false,
+                exports: [],
+                details: [],
+                resolvedTarget: undefined,
+                onOpenAt,
+                title: n.path,
+                // size scaling by token count (sqrt dampening)
+                sizePx: Math.floor(
+                  minSize + (Math.sqrt(Math.max(1, n.est_tokens)) / Math.sqrt(maxTok)) * (maxSize - minSize)
+                )
               },
               style: { zIndex: 0 }
             }));
@@ -366,8 +617,9 @@ export function App() {
               id: e.id,
               source: e.source,
               target: e.target,
-              // carry weight through for force distance
-              ...(e.weight ? ({ weight: e.weight } as any) : {})
+              type: "network",
+              markerEnd: { type: MarkerType.ArrowClosed },
+              data: { weight: e.weight }
             }));
 
             setNodes(moduleNodes);
@@ -472,6 +724,34 @@ export function App() {
         const exportsList = Array.isArray(payload?.exports) ? (payload.exports as string[]) : [];
         const file = typeof payload?.file === "string" ? payload.file : msg.targetPath;
 
+        // Module drill-down: if targetPath matches a module node, attach exports/symbols to that node.
+        const updatedModule = nodes.some(
+          (n) => n.type === "moduleNode" && (((n.data as any)?.path ?? n.id) === msg.targetPath || n.id === msg.targetPath)
+        );
+        if (updatedModule) {
+          setNodes((prev) =>
+            prev.map((n) => {
+              if (n.type !== "moduleNode") return n;
+              const modulePath = String((n.data as any)?.path ?? n.id);
+              if (modulePath !== msg.targetPath && n.id !== msg.targetPath) return n;
+
+              return {
+                ...n,
+                data: {
+                  ...(n.data as any),
+                  loading: false,
+                  expanded: true,
+                  exports: exportsList,
+                  details: symbols,
+                  resolvedTarget: payload?.resolvedTarget ?? file
+                }
+              };
+            })
+          );
+          setStatus(msg.ok ? "Ready" : `Inspect failed: ${msg.error}`);
+          return;
+        }
+
         setNodes((prev) =>
           prev.map((n) => {
             const matchById = pending?.targetPath === msg.targetPath && n.id === pending.containerId;
@@ -526,7 +806,8 @@ export function App() {
     };
 
     window.addEventListener("message", onMessage);
-    vscode.postMessage({ command: "refreshMap", budgetTokens, mode: "file-tree" });
+    setStatus("Discovering modules...");
+    vscode.postMessage({ command: "webviewReady" });
     return () => window.removeEventListener("message", onMessage);
   }, []);
 
@@ -534,11 +815,36 @@ export function App() {
     // Switch data source when view mode changes.
     if (viewMode === "modules") {
       setLastMap(null);
-      vscode.postMessage({ command: "refreshMap", budgetTokens, mode: "module-network", targetPath: "." });
+      // Native manager: graph is driven by checkbox-selected manifests.
+      if (selectedModules.length) {
+        refreshSelectedModules(selectedModules);
+      } else {
+        setNodes([]);
+        setEdges([]);
+      }
     } else {
-      vscode.postMessage({ command: "refreshMap", budgetTokens, mode: "file-tree" });
+      // IMPORTANT: do not auto-refresh file-tree on startup.
+      // Only refresh file-tree if the user explicitly switched to File Tree View.
+      if (fileTreeAutoRefreshEnabledRef.current) {
+        postRefreshMap({ mode: "file-tree", budgetTokens });
+      } else {
+        logToExt("File Tree auto-refresh skipped (not explicitly enabled)");
+      }
     }
   }, [viewMode, budgetTokens]);
+
+  useEffect(() => {
+    // Data guard (post-processing): if module-shaped data ended up in the file-tree map state,
+    // switch back to module view so the UI can't get stuck showing the wrong mode.
+    const nodesAny = (lastMap as any)?.nodes;
+    const looksLikeModuleGraph = Array.isArray(nodesAny) && nodesAny.some((n: any) => typeof n?.file_count === "number");
+    if (viewMode === "files" && looksLikeModuleGraph) {
+      console.log("[AnvilHolo] Auto-switching to Network View based on lastMap shape");
+      viewModeRef.current = "modules";
+      setViewMode("modules");
+      setSidebarCollapsed(false);
+    }
+  }, [lastMap, viewMode]);
 
   useEffect(() => {
     const onResize = () => setWinSize({ w: window.innerWidth, h: window.innerHeight });
@@ -609,17 +915,74 @@ export function App() {
     const est = (node.data as any)?.estTokens;
     setSelectedEstTokens(typeof est === "number" ? est : null);
 
+    // Module drill-down: inspect entry file for the module (resolved by extension host).
+    if (node.type === "moduleNode") {
+      const modulePath = String((node.data as any)?.path ?? node.id);
+      logToExt(`Inspecting module: ${modulePath}`);
+      setStatus(`Inspecting module: ${modulePath}`);
+      setNodes((prev) =>
+        prev.map((n) => {
+          if (n.id !== node.id) return n;
+          return {
+            ...n,
+            data: {
+              ...(n.data as any),
+              loading: true,
+              expanded: true,
+              exports: (n.data as any)?.exports ?? [],
+              details: (n.data as any)?.details ?? []
+            }
+          };
+        })
+      );
+      vscode.postMessage({ command: "inspectNode", targetPath: modulePath });
+    }
+
+    // Make module-network selection visible/actionable.
+    if (viewModeRef.current === "modules" || node.type === "moduleNode") {
+      const fileCount = (node.data as any)?.fileCount;
+      const inCount = (node.data as any)?.inCount;
+      const outCount = (node.data as any)?.outCount;
+      const inWeight = (node.data as any)?.inWeight;
+      const outWeight = (node.data as any)?.outWeight;
+
+      const msg =
+        `Selected module: ${node.id}` +
+        (typeof fileCount === "number" ? ` (${fileCount} files)` : "") +
+        (typeof est === "number" ? ` (${Math.round(est).toLocaleString()} tok)` : "") +
+        (typeof inCount === "number" || typeof outCount === "number"
+          ? ` | in=${Number(inCount || 0)}(${Number(inWeight || 0)}) out=${Number(outCount || 0)}(${Number(outWeight || 0)})`
+          : "");
+
+      setStatus(msg);
+      logToExt(msg);
+    }
+
     // Keep selection behavior, but let the custom node handle actual actions.
+  };
+
+  const onNodeDoubleClick = (_: any, node: Node) => {
+    if (node.type !== "moduleNode" && viewModeRef.current !== "modules") return;
+    logToExt(`Double-click slice/open: ${node.id}`);
+    vscode.postMessage({ command: "focusNode", target: node.id, budgetTokens, action: "open" });
   };
 
   const onPaneDoubleClick = () => {
     // Single-click is frequently used for panning interactions; double-click is safer.
-    vscode.postMessage({ command: "refreshMap", budgetTokens });
+    if (viewModeRef.current === "modules") {
+      if (selectedModules.length) refreshSelectedModules(selectedModules);
+      return;
+    }
+    postRefreshMap({ mode: "file-tree", budgetTokens });
   };
 
   const onManualRefresh = () => {
     setIsRefreshing(true);
-    vscode.postMessage({ command: "refreshMap", budgetTokens });
+    if (viewModeRef.current === "modules") {
+      refreshSelectedModules(selectedModules);
+      return;
+    }
+    postRefreshMap({ mode: "file-tree", budgetTokens });
   };
 
   const onCopyXml = () => {
@@ -705,6 +1068,77 @@ export function App() {
     color: "var(--vscode-foreground)"
   };
 
+  const showModuleHint = viewMode === "modules" && selectedModules.length === 0 && nodes.length === 0;
+  const showEmptyGraphError = viewMode === "modules" && selectedModules.length > 0 && nodes.length === 0 && !isRefreshing;
+
+  const sidebarWidth = 320;
+  const sidebarOpenWidth = sidebarCollapsed ? 0 : sidebarWidth;
+
+  const panelButtonStyle: React.CSSProperties = {
+    border: "1px solid var(--vscode-button-border)",
+    background: "transparent",
+    color: "var(--vscode-foreground)",
+    borderRadius: 8,
+    padding: "6px 10px",
+    cursor: "pointer",
+    fontWeight: 800,
+    fontSize: 12
+  };
+
+  const sidebarButtonStyle: React.CSSProperties = {
+    border: "1px solid var(--vscode-button-border)",
+    background: "var(--vscode-button-background)",
+    color: "var(--vscode-button-foreground)",
+    borderRadius: 8,
+    padding: "6px 10px",
+    cursor: "pointer",
+    fontWeight: 800,
+    fontSize: 12
+  };
+
+  const displayNameForManifest = (p: string) => {
+    const normalized = String(p || "").replace(/\\/g, "/");
+    return normalized.replace(/\/(package\.json|Cargo\.toml|pubspec\.yaml|go\.mod)$/i, "");
+  };
+
+  const selectedModulePanel = useMemo(() => {
+    if (viewMode !== "modules") return null;
+    if (!selectedNodeId) return null;
+    const node = nodes.find((n) => n.id === selectedNodeId && n.type === "moduleNode");
+    if (!node) return null;
+
+    const fileCount = (node.data as any)?.fileCount;
+    const estTokens = (node.data as any)?.estTokens;
+    const inCount = (node.data as any)?.inCount ?? 0;
+    const outCount = (node.data as any)?.outCount ?? 0;
+    const inWeight = (node.data as any)?.inWeight ?? 0;
+    const outWeight = (node.data as any)?.outWeight ?? 0;
+
+    const outbound = edges
+      .filter((e) => e.source === node.id)
+      .map((e) => ({ id: e.target, w: Number((e.data as any)?.weight ?? 1) }))
+      .sort((a, b) => b.w - a.w)
+      .slice(0, 8);
+    const inbound = edges
+      .filter((e) => e.target === node.id)
+      .map((e) => ({ id: e.source, w: Number((e.data as any)?.weight ?? 1) }))
+      .sort((a, b) => b.w - a.w)
+      .slice(0, 8);
+
+    return {
+      id: node.id,
+      label: String((node.data as any)?.label ?? node.id),
+      fileCount: typeof fileCount === "number" ? fileCount : undefined,
+      estTokens: typeof estTokens === "number" ? estTokens : undefined,
+      inCount,
+      outCount,
+      inWeight,
+      outWeight,
+      inbound,
+      outbound
+    };
+  }, [viewMode, selectedNodeId, nodes, edges]);
+
   return (
     <div
       style={{
@@ -716,6 +1150,106 @@ export function App() {
         background: "var(--vscode-editor-background)"
       }}
     >
+      <style>{`
+        @keyframes anvilSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+      `}</style>
+
+      {/* Sidebar (Module Manager) */}
+      {!sidebarCollapsed && (
+        <div
+          style={{
+            position: "absolute",
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: sidebarOpenWidth,
+            borderRight: "1px solid var(--vscode-panel-border)",
+            background: "var(--vscode-sideBar-background)",
+            color: "var(--vscode-foreground)",
+            zIndex: 9,
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden"
+          }}
+        >
+          <div style={{ padding: 10, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <b>Available Modules</b>
+            <button onClick={() => setSidebarCollapsed(true)} style={panelButtonStyle} title="Collapse sidebar">
+              Hide
+            </button>
+          </div>
+
+          <div style={{ padding: "0 10px 10px", display: "flex", gap: 8 }}>
+            <button
+              style={{ ...sidebarButtonStyle, opacity: availableModules.length ? 1 : 0.5 }}
+              onClick={() => refreshSelectedModules(availableModules.map((m) => m.path))}
+              disabled={!availableModules.length}
+              title="Select all discovered modules"
+            >
+              Select All
+            </button>
+            <button
+              style={{ ...sidebarButtonStyle, opacity: selectedModules.length ? 1 : 0.5 }}
+              onClick={() => refreshSelectedModules([])}
+              disabled={!selectedModules.length}
+              title="Clear selection"
+            >
+              Clear All
+            </button>
+          </div>
+
+          <div style={{ padding: "0 10px 10px", fontSize: 12, opacity: 0.9 }}>
+            {availableModules.length ? `${availableModules.length} detected` : "No manifests detected"}
+          </div>
+
+          <div style={{ flex: 1, overflowY: "auto", padding: "0 10px 12px" }}>
+            {availableModules.map((m) => {
+              const checked = selectedModules.includes(m.path);
+              const label = displayNameForManifest(m.path) || m.path;
+              return (
+                <label
+                  key={m.path}
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    alignItems: "flex-start",
+                    padding: "6px 4px",
+                    borderRadius: 8,
+                    cursor: "pointer"
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(e) => {
+                      const next = e.target.checked
+                        ? [...selectedModules, m.path]
+                        : selectedModules.filter((p) => p !== m.path);
+                      refreshSelectedModules(next);
+                    }}
+                    style={{ marginTop: 2 }}
+                  />
+                  <div style={{ display: "flex", flexDirection: "column" }}>
+                    <span style={{ fontWeight: 800, fontSize: 12 }}>{label}</span>
+                    <span style={{ fontSize: 11, opacity: 0.8 }}>
+                      {m.type} • {m.path}
+                    </span>
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {sidebarCollapsed && (
+        <div style={{ position: "absolute", left: 10, top: 10, zIndex: 9 }}>
+          <button onClick={() => setSidebarCollapsed(false)} style={panelButtonStyle} title="Show sidebar">
+            Show Modules
+          </button>
+        </div>
+      )}
+
       {/* On-screen debugger (temporary) */}
       <div
         style={{
@@ -743,7 +1277,7 @@ export function App() {
         style={{
           position: "absolute",
           top: 10,
-          left: 10,
+          left: sidebarOpenWidth ? sidebarOpenWidth + 10 : 10,
           display: "flex",
           alignItems: "center",
           gap: 8,
@@ -770,11 +1304,17 @@ export function App() {
       </form>
 
       {/* Canvas */}
-      <div style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}>
+      <div
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
+      >
         <ReactFlow
           nodes={nodes}
           edges={edges}
-          onNodeClick={onNodeClick}
+          onNodeClick={(evt, node) => {
+            onNodeClick(evt, node);
+            // React Flow v11 does not support onNodeDoubleClick; emulate via click detail.
+            if ((evt as any)?.detail === 2) onNodeDoubleClick(evt, node);
+          }}
           onPaneClick={(evt) => {
             console.log("[AnvilHolo] onPaneClick", { detail: (evt as any)?.detail });
             // React Flow v11 does not support onPaneDoubleClick; emulate via click detail.
@@ -795,11 +1335,160 @@ export function App() {
           panOnScroll={true}
           zoomOnScroll={true}
           zoomOnPinch={true}
-          nodeTypes={{ file: FileNode, directory: FileNode, module: ModuleNode }}
+          nodeTypes={{ file: FileNode, directory: FileNode, moduleNode: ModuleNode }}
+          edgeTypes={{ network: NetworkEdge }}
         >
           <Background />
           <Controls />
         </ReactFlow>
+
+        {selectedModulePanel && (
+          <div
+            style={{
+              position: "absolute",
+              left: sidebarOpenWidth ? sidebarOpenWidth + 14 : 14,
+              top: 58,
+              zIndex: 6,
+              maxWidth: 460,
+              borderRadius: 12,
+              border: "1px solid var(--vscode-panel-border)",
+              background: "var(--vscode-editorWidget-background)",
+              color: "var(--vscode-foreground)",
+              padding: "10px 12px"
+            }}
+          >
+            <div style={{ fontWeight: 900, fontSize: 12, marginBottom: 6 }}>
+              Selected: {selectedModulePanel.label}
+            </div>
+            <div style={{ fontSize: 11, opacity: 0.85, marginBottom: 6 }}>
+              {typeof selectedModulePanel.fileCount === "number" ? `${selectedModulePanel.fileCount} files` : ""}
+              {typeof selectedModulePanel.estTokens === "number"
+                ? ` • ${Math.round(selectedModulePanel.estTokens).toLocaleString()} tok`
+                : ""}
+              {` • in=${selectedModulePanel.inCount}(${selectedModulePanel.inWeight}) out=${selectedModulePanel.outCount}(${selectedModulePanel.outWeight})`}
+            </div>
+
+            {selectedModulePanel.inCount + selectedModulePanel.outCount === 0 ? (
+              <div style={{ fontSize: 11, opacity: 0.8 }}>
+                No connections detected between selected modules (edges=0).
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 12, fontSize: 11, opacity: 0.9 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 800, marginBottom: 4 }}>Outbound</div>
+                  {selectedModulePanel.outbound.map((x) => (
+                    <div key={x.id} style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{x.id}</span>
+                      <span style={{ opacity: 0.8 }}>{x.w}</span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 800, marginBottom: 4 }}>Inbound</div>
+                  {selectedModulePanel.inbound.map((x) => (
+                    <div key={x.id} style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{x.id}</span>
+                      <span style={{ opacity: 0.8 }}>{x.w}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {showModuleHint && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              pointerEvents: "none",
+              zIndex: 4
+            }}
+          >
+            <div
+              style={{
+                padding: "18px 22px",
+                borderRadius: 12,
+                border: "1px dashed var(--vscode-panel-border)",
+                background: "var(--vscode-editorWidget-background)",
+                color: "var(--vscode-foreground)",
+                opacity: 0.92,
+                fontWeight: 700
+              }}
+            >
+              No modules selected. Select checkboxes in the sidebar to build the graph.
+            </div>
+          </div>
+        )}
+
+        {showEmptyGraphError && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              pointerEvents: "none",
+              zIndex: 4
+            }}
+          >
+            <div
+              style={{
+                padding: "22px 28px",
+                borderRadius: 12,
+                border: "2px solid var(--vscode-errorForeground)",
+                background: "var(--vscode-editorWidget-background)",
+                color: "var(--vscode-foreground)",
+                opacity: 0.95,
+                maxWidth: "600px",
+                textAlign: "center"
+              }}
+            >
+              <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 12, color: "var(--vscode-errorForeground)" }}>
+                ⚠️ No Modules Found
+              </div>
+              <div style={{ fontSize: 13, marginBottom: 8 }}>
+                Scanned manifests: {selectedModules.map(displayNameForManifest).join(", ")}
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.8 }}>
+                Check the <strong>Output Channel</strong> (View → Output → "AnvilHolo") for Rust debug logs.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isRefreshing && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "transparent",
+              zIndex: 5
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div
+                style={{
+                  width: 18,
+                  height: 18,
+                  borderRadius: 999,
+                  border: "2px solid var(--vscode-panel-border)",
+                  borderTopColor: "var(--vscode-progressBar-background)",
+                  animation: "anvilSpin 0.9s linear infinite"
+                }}
+              />
+              <div style={{ color: "var(--vscode-foreground)", fontWeight: 700 }}>Loading…</div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Status bar */}
@@ -836,6 +1525,13 @@ export function App() {
       {/* Floating toolbar (bottom center) */}
       <div style={{ ...toolbarStyle, zIndex: 6 }}>
         <button
+          onClick={clearCanvas}
+          style={toolbarButtonStyle}
+          title="Clear canvas"
+        >
+          <span style={{ fontSize: 12, fontWeight: 800 }}>Clear</span>
+        </button>
+        <button
           onClick={onManualRefresh}
           disabled={isRefreshing}
           style={{ ...toolbarButtonStyle, opacity: isRefreshing ? 0.6 : 1, cursor: isRefreshing ? "default" : "pointer" }}
@@ -859,9 +1555,11 @@ export function App() {
         <button
           onClick={onToggleView}
           style={toolbarButtonStyle}
-          title={viewMode === "files" ? "View: Files" : "View: Modules"}
+          title={viewMode === "files" ? "Switch to System Network" : "Switch to File Tree"}
         >
-          <span style={{ fontSize: 12, fontWeight: 800 }}>{viewMode === "files" ? "F" : "M"}</span>
+          <span style={{ fontSize: 12, fontWeight: 800 }}>
+            {viewMode === "files" ? "🕸️ System Network" : "📂 File Tree"}
+          </span>
         </button>
         <button
           onClick={onCopyXml}

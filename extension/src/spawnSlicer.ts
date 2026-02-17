@@ -17,6 +17,17 @@ export async function spawnSlicerXml(
   const outDir = join(workspaceRoot, ".context-slicer");
   const outputPath = join(outDir, "active_context.xml");
 
+  // Resilience: ensure output directory exists up-front.
+  // Users often delete `.context-slicer/` as a cleanup step.
+  try {
+    await vscode.workspace.fs.createDirectory(vscode.Uri.file(outDir));
+  } catch (e: any) {
+    if (opts?.outputChannel) {
+      opts.outputChannel.appendLine(`[spawnSlicerXml] WARN: failed to create outDir early: ${e?.message || String(e)}`);
+    }
+    // Continue; we retry before write.
+  }
+
   const args = ["--target", target, "--xml"];
   if (Number.isFinite(opts?.budgetTokens as any)) {
     args.push("--budget-tokens", String(opts!.budgetTokens));

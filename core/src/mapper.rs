@@ -54,6 +54,498 @@ pub struct ModuleGraph {
     pub edges: Vec<ModuleEdge>,
 }
 
+fn is_known_manifest_file(name: &str) -> bool {
+    matches!(name, "package.json" | "Cargo.toml" | "pubspec.yaml" | "go.mod")
+}
+
+fn read_package_json_name(package_json: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(package_json).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("name").and_then(|n| n.as_str()).map(|s| s.to_string())
+}
+
+fn read_pubspec_name(pubspec_yaml: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(pubspec_yaml).ok()?;
+    for line in text.lines() {
+        let l = line.trim();
+        if l.starts_with('#') || l.is_empty() {
+            continue;
+        }
+        if let Some(rest) = l.strip_prefix("name:") {
+            let name = rest.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn read_go_module_name(go_mod: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(go_mod).ok()?;
+    for line in text.lines() {
+        let l = line.trim();
+        if l.starts_with("module ") {
+            let module_path = l.trim_start_matches("module ").trim();
+            if module_path.is_empty() {
+                return None;
+            }
+            // Prefer a short label: last segment of module path.
+            return Some(
+                module_path
+                    .split('/')
+                    .filter(|s| !s.is_empty())
+                    .last()
+                    .unwrap_or(module_path)
+                    .to_string(),
+            );
+        }
+    }
+    None
+}
+
+fn read_cargo_package_name(cargo_toml: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(cargo_toml).ok()?;
+    let value: toml::Value = text.parse().ok()?;
+    value
+        .get("package")
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .map(|s| s.to_string())
+}
+
+fn read_cargo_lib_name(cargo_toml: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(cargo_toml).ok()?;
+    let value: toml::Value = text.parse().ok()?;
+    value
+        .get("lib")
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Read path-based dependencies from Cargo.toml.
+/// Returns Vec<(dependency_name, relative_path_to_dependency)>.
+fn read_cargo_dependencies(cargo_toml: &Path) -> Vec<(String, String)> {
+    let text = match std::fs::read_to_string(cargo_toml) {
+        Ok(t) => t,
+        Err(_) => return vec![],
+    };
+    let value: toml::Value = match text.parse() {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+
+    let mut result = Vec::new();
+    
+    // Check both [dependencies] and [dev-dependencies]
+    for section in &["dependencies", "dev-dependencies"] {
+        if let Some(deps) = value.get(section).and_then(|d| d.as_table()) {
+            for (dep_name, dep_value) in deps {
+                // Check if it's a path dependency: { path = "../some-service" }
+                if let Some(path_str) = dep_value
+                    .as_table()
+                    .and_then(|t| t.get("path"))
+                    .and_then(|p| p.as_str())
+                {
+                    result.push((dep_name.clone(), path_str.to_string()));
+                }
+            }
+        }
+    }
+    
+    result
+}
+
+fn module_id_for_rel_path(file_rel: &str, module_roots: &[(String, String)]) -> Option<String> {
+    // module_roots: (dir_rel, module_id)
+    let mut best: Option<(&String, usize)> = None;
+    for (root, id) in module_roots {
+        if root.is_empty() || root == "." {
+            // Root module matches everything, but prefer more specific roots.
+            let depth = 0;
+            match best {
+                None => best = Some((id, depth)),
+                Some((_, best_depth)) if depth > best_depth => best = Some((id, depth)),
+                _ => {}
+            }
+            continue;
+        }
+
+        if file_rel == root {
+            let depth = root.len();
+            match best {
+                None => best = Some((id, depth)),
+                Some((_, best_depth)) if depth > best_depth => best = Some((id, depth)),
+                _ => {}
+            }
+            continue;
+        }
+
+        if file_rel.starts_with(root) {
+            let bytes = file_rel.as_bytes();
+            if bytes.get(root.len()) == Some(&b'/') {
+                let depth = root.len();
+                match best {
+                    None => best = Some((id, depth)),
+                    Some((_, best_depth)) if depth > best_depth => best = Some((id, depth)),
+                    _ => {}
+                }
+            }
+        }
+    }
+    best.map(|(id, _)| id.clone())
+}
+
+/// Build a dependency graph strictly from the provided manifest files.
+///
+/// Contract:
+/// - Creates exactly 1 module node per manifest's parent directory.
+/// - Only scans files inside those module directories.
+/// - Does not descend into nested selected modules.
+/// - Creates edges only when an import/usage resolves to another selected module.
+pub fn build_map_from_manifests(repo_root: &Path, manifests: &[PathBuf]) -> Result<ModuleGraph> {
+    // 1) Normalize module directories.
+    #[derive(Clone)]
+    struct ModuleSpec {
+        dir_abs: PathBuf,
+        dir_rel: String,
+        id: String,
+        label: String,
+        cargo_name: Option<String>,
+        cargo_lib_name: Option<String>,
+    }
+
+    let mut specs: Vec<ModuleSpec> = Vec::new();
+    let mut seen_dirs: BTreeSet<PathBuf> = BTreeSet::new();
+
+    for m in manifests {
+        // CRITICAL DEBUG: Show raw input manifest path
+        eprintln!("[DEBUG] Manifest Input: {}", m.display());
+
+        // Normalize separators for relative paths (helps when the extension passes Windows-style paths).
+        let m_norm = if m.is_absolute() {
+            m.clone()
+        } else {
+            PathBuf::from(normalize_slash(m.as_ref()))
+        };
+
+        let abs = if m_norm.is_absolute() { m_norm.clone() } else { repo_root.join(&m_norm) };
+        let abs = abs.canonicalize().unwrap_or(abs);
+
+        eprintln!("[DEBUG]   Absolute Path: {}", abs.display());
+
+        let name = abs.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if !is_known_manifest_file(name) {
+            eprintln!("[DEBUG]   SKIP: Not a known manifest file: {}", name);
+            continue;
+        }
+        if !abs.exists() {
+            eprintln!("[DEBUG]   ERROR: Manifest not found: {}", abs.display());
+            anyhow::bail!("Manifest not found: {}", abs.display());
+        }
+        let Some(parent) = abs.parent() else {
+            eprintln!("[DEBUG]   SKIP: No parent directory");
+            continue;
+        };
+        if path_has_forbidden_component(parent) {
+            eprintln!("[DEBUG]   SKIP: Forbidden path component");
+            continue;
+        }
+
+        let dir_abs = parent.to_path_buf();
+        if seen_dirs.contains(&dir_abs) {
+            eprintln!("[DEBUG]   SKIP: Duplicate module directory");
+            continue;
+        }
+        seen_dirs.insert(dir_abs.clone());
+
+        let dir_rel = rel_str(repo_root, &dir_abs).unwrap_or_else(|| normalize_slash(&dir_abs));
+        let id = normalize_module_id(&dir_rel);
+        
+        eprintln!("[DEBUG]   Normalized ID: {}", id);
+
+        let folder_fallback = dir_abs
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("module")
+            .to_string();
+
+        let mut label = folder_fallback.clone();
+        let mut cargo_name: Option<String> = None;
+        let mut cargo_lib_name: Option<String> = None;
+
+        match name {
+            "package.json" => {
+                if let Some(n) = read_package_json_name(&abs) {
+                    label = n;
+                }
+            }
+            "Cargo.toml" => {
+                cargo_name = read_cargo_package_name(&abs);
+                cargo_lib_name = read_cargo_lib_name(&abs);
+                // Prefer lib.name for display (often matches Rust import crate name), fallback to package.name.
+                if let Some(n) = cargo_lib_name.clone().or_else(|| cargo_name.clone()) {
+                    label = n;
+                }
+            }
+            "pubspec.yaml" => {
+                if let Some(n) = read_pubspec_name(&abs) {
+                    label = n;
+                }
+            }
+            "go.mod" => {
+                if let Some(n) = read_go_module_name(&abs) {
+                    label = n;
+                }
+            }
+            _ => {}
+        }
+
+        specs.push(ModuleSpec {
+            dir_abs,
+            dir_rel,
+            id,
+            label,
+            cargo_name,
+            cargo_lib_name,
+        });
+    }
+
+    specs.sort_by(|a, b| a.id.cmp(&b.id));
+    if specs.is_empty() {
+        return Ok(ModuleGraph { nodes: vec![], edges: vec![] });
+    }
+
+    // 2) Build node list + metadata.
+    #[derive(Clone, Default)]
+    struct Acc {
+        bytes: u64,
+        file_count: u64,
+        files: Vec<PathBuf>,
+    }
+
+    let module_dir_rel_set: BTreeSet<String> = specs.iter().map(|s| s.dir_rel.clone()).collect();
+    let repo_root_owned = repo_root.to_path_buf();
+    let module_roots_rel: Vec<(String, String)> = specs
+        .iter()
+        .map(|s| (s.dir_rel.clone(), s.id.clone()))
+        .collect();
+
+    let mut acc_by_dir: BTreeMap<PathBuf, Acc> = BTreeMap::new();
+    for s in &specs {
+        acc_by_dir.entry(s.dir_abs.clone()).or_default();
+    }
+
+    // 3) Scan files inside each module dir only (and don't descend into nested selected modules).
+    for s in &specs {
+        let d = &s.dir_abs;
+        let repo_root_owned = repo_root_owned.clone();
+        let module_dir_rel_set = module_dir_rel_set.clone();
+        let walker = WalkBuilder::new(d)
+            .standard_filters(true)
+            .hidden(false)
+            .max_depth(Some(25))
+            .filter_entry(move |entry| {
+                let name = entry.file_name().to_str().unwrap_or("");
+                if should_skip_dir_name(name) {
+                    return false;
+                }
+                if path_has_forbidden_component(entry.path()) {
+                    return false;
+                }
+
+                // Do not descend into other selected modules if nested.
+                if entry.depth() > 0 {
+                    if let Some(rel) = rel_str(&repo_root_owned, entry.path()) {
+                        if module_dir_rel_set.contains(&rel) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            })
+            .build();
+
+        for ent in walker {
+            let Ok(ent) = ent else { continue };
+            if !ent.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let p = ent.path();
+            if !is_allowed_source_ext(p) {
+                continue;
+            }
+            if path_has_forbidden_component(p) {
+                continue;
+            }
+            let sz = ent.metadata().map(|m| m.len()).unwrap_or(0);
+            let a = acc_by_dir.get_mut(d).unwrap();
+            a.bytes += sz;
+            a.file_count += 1;
+            a.files.push(p.to_path_buf());
+        }
+    }
+
+    // Push counts into nodes.
+    let mut nodes: Vec<ModuleNode> = Vec::new();
+    for s in &specs {
+        let a = acc_by_dir.get(&s.dir_abs).cloned().unwrap_or_default();
+        nodes.push(ModuleNode {
+            id: s.id.clone(),
+            label: s.label.clone(),
+            path: s.id.clone(),
+            file_count: a.file_count,
+            bytes: a.bytes,
+            est_tokens: est_tokens_from_bytes(a.bytes),
+        });
+    }
+    nodes.sort_by(|a, b| a.id.cmp(&b.id));
+
+    // Build mapping for Rust crate name -> module id.
+    let mut crate_to_module: BTreeMap<String, String> = BTreeMap::new();
+    for s in &specs {
+        if let Some(name) = s.cargo_name.clone() {
+            crate_to_module.insert(name.clone(), s.id.clone());
+            // Cargo package names may contain '-' but Rust `use` paths use '_' for crate names.
+            let underscored = name.replace('-', "_");
+            if underscored != name {
+                crate_to_module.insert(underscored, s.id.clone());
+            }
+        }
+        if let Some(name) = s.cargo_lib_name.clone() {
+            crate_to_module.insert(name.clone(), s.id.clone());
+            let underscored = name.replace('-', "_");
+            if underscored != name {
+                crate_to_module.insert(underscored, s.id.clone());
+            }
+        }
+    }
+
+    // Build map of relative path (normalized) -> module id for path-based dependency resolution.
+    let mut path_to_module: BTreeMap<String, String> = BTreeMap::new();
+    for s in &specs {
+        path_to_module.insert(s.dir_rel.clone(), s.id.clone());
+    }
+
+    // 3.5) Scan Cargo.toml dependencies to create edges.
+    let mut weights: BTreeMap<(String, String), u64> = BTreeMap::new();
+
+    eprintln!("[DEBUG] Scanning Cargo.toml dependencies for edges");
+    for s in &specs {
+        // Look for Cargo.toml in this module's directory
+        let cargo_toml_path = s.dir_abs.join("Cargo.toml");
+        if !cargo_toml_path.exists() {
+            continue;
+        }
+
+        let deps = read_cargo_dependencies(&cargo_toml_path);
+        eprintln!("[DEBUG] Module '{}' has {} Cargo dependencies", s.id, deps.len());
+
+        for (dep_name, dep_path) in deps {
+            // Resolve the relative path from this module's directory
+            let dep_abs = s.dir_abs.join(&dep_path);
+            let dep_abs = dep_abs.canonicalize().unwrap_or(dep_abs);
+            
+            // Convert to repo-relative path
+            let dep_rel = match rel_str(repo_root, &dep_abs) {
+                Some(r) => r,
+                None => continue,
+            };
+
+            // Find the module that corresponds to this path
+            if let Some(dst_mod_id) = path_to_module.get(&dep_rel) {
+                if dst_mod_id != &s.id {
+                    eprintln!(
+                        "[DEBUG] Cargo dependency edge: {} -> {} (via dependency '{}')",
+                        s.id, dst_mod_id, dep_name
+                    );
+                    // Add weight 5 for explicit dependency (higher than single import)
+                    *weights.entry((s.id.clone(), dst_mod_id.clone())).or_insert(0) += 5;
+                }
+            } else {
+                eprintln!(
+                    "[DEBUG] Cargo dependency '{}' path '{}' (resolved: '{}') does not match any selected module",
+                    dep_name, dep_path, dep_rel
+                );
+            }
+        }
+    }
+
+    // 4) Resolve imports into edges between selected modules.
+
+    let module_ids: Vec<(PathBuf, String)> = specs.iter().map(|s| (s.dir_abs.clone(), s.id.clone())).collect();
+
+    eprintln!("[DEBUG] Starting import resolution. Module count: {}", module_ids.len());
+
+    for (dir, src_mod_id) in &module_ids {
+        let a = acc_by_dir.get(dir).cloned().unwrap_or_default();
+        eprintln!("[DEBUG] Processing module '{}' with {} files", src_mod_id, a.files.len());
+        
+        for file_abs in &a.files {
+            let analyzed = match analyze_file(file_abs) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let ext = file_abs.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            let is_rust = ext == "rs";
+
+            for imp in analyzed.imports {
+                if is_rust {
+                    // Rust: `use foo::bar::Baz;` -> crate `foo`
+                    let first = imp.split("::").next().unwrap_or("").trim();
+                    if first.is_empty() {
+                        continue;
+                    }
+                    if let Some(dst_mod_id) = crate_to_module.get(first) {
+                        if dst_mod_id != src_mod_id {
+                            eprintln!("[DEBUG] Trying to match import (Rust) {} -> {}", src_mod_id, dst_mod_id);
+                            *weights
+                                .entry((src_mod_id.clone(), dst_mod_id.clone()))
+                                .or_insert(0) += 1;
+                        }
+                    }
+                    continue;
+                }
+
+                // TS/JS: resolve relative import to a file, then map to a selected module by prefix.
+                let Some(dst_file_abs) = resolve_ts_import(repo_root, file_abs, &imp) else { continue };
+                let dst_file_abs = dst_file_abs.canonicalize().unwrap_or(dst_file_abs);
+
+                // Compare using repo-relative forward-slash paths to avoid OS separator mismatches.
+                let Some(dst_rel) = rel_str(repo_root, &dst_file_abs) else { continue };
+                let Some(dst_mod_id) = module_id_for_rel_path(&dst_rel, &module_roots_rel) else { continue };
+                if dst_mod_id != *src_mod_id {
+                    eprintln!("[DEBUG] Trying to match import {} -> {}", src_mod_id, dst_mod_id);
+                    *weights.entry((src_mod_id.clone(), dst_mod_id)).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    let mut edges: Vec<ModuleEdge> = Vec::new();
+    for ((s, t), w) in weights {
+        eprintln!("[DEBUG] Creating edge: {} -> {} (weight: {})", s, t, w);
+        edges.push(ModuleEdge {
+            id: format!("{}->{}", s, t),
+            source: s,
+            target: t,
+            weight: w,
+        });
+    }
+    edges.sort_by(|a, b| a.id.cmp(&b.id));
+
+    eprintln!("[DEBUG] Final graph: {} nodes, {} edges", nodes.len(), edges.len());
+
+    Ok(ModuleGraph { nodes, edges })
+}
+
+// Backward-compatible alias (older extension versions may still reference this name).
+pub fn build_graph_from_manifests(repo_root: &Path, manifests: &[PathBuf]) -> Result<ModuleGraph> {
+    build_map_from_manifests(repo_root, manifests)
+}
+
 fn size_class_from_bytes(bytes: u64) -> String {
     if bytes < 200_000 {
         "small".to_string()
@@ -301,10 +793,16 @@ pub fn build_module_graph(repo_root: &Path, root: &Path) -> Result<ModuleGraph> 
     Ok(ModuleGraph { nodes, edges })
 }
 
+/// Core path normalization helper: ALWAYS converts backslashes to forward slashes.
+/// This ensures cross-platform consistency (Windows \ vs Unix /).
+fn normalize_slash(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
+
 fn rel_str(repo_root: &Path, p: &Path) -> Option<String> {
     p.strip_prefix(repo_root)
         .ok()
-        .map(|x| x.to_string_lossy().replace('\\', "/"))
+        .map(|x| normalize_slash(x.as_ref()))
 }
 
 fn normalize_module_id(rel: &str) -> String {
@@ -368,6 +866,13 @@ fn is_allowed_ext(path: &Path) -> bool {
         // Web / styles (small allowlist, safe to count)
         "css" | "scss" | "sass" | "html"
     )
+}
+
+fn is_allowed_source_ext(path: &Path) -> bool {
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    matches!(ext, "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "dart")
 }
 
 pub fn build_repo_map(repo_root: &Path) -> Result<RepoMap> {

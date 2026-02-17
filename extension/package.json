@@ -13,7 +13,8 @@
   "main": "./dist/extension.js",
   "activationEvents": [
     "onCommand:anvilHolo.open",
-    "onCommand:anvilHolo.debugWrite"
+    "onCommand:anvilHolo.debugWrite",
+    "onCommand:anvilHolo.addToGraph"
   ],
   "contributes": {
     "commands": [
@@ -24,17 +25,31 @@
       {
         "command": "anvilHolo.debugWrite",
         "title": "AnvilHolo: Debug Write (.context-slicer/hello.txt)"
+      },
+      {
+        "command": "anvilHolo.addToGraph",
+        "title": "AnvilHolo: Add Module To Graph"
       }
-    ]
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "anvilHolo.addToGraph",
+          "when": "explorerResourceIsFolder"
+        }
+      ]
+    }
   },
   "scripts": {
     "build": "npm run build:ext && npm run build:webview",
     "build:ext": "node ./esbuild.extension.mjs",
     "build:webview": "node ./esbuild.webview.mjs",
+    "build:integration-tests": "node ./esbuild.tests.mjs",
     "watch": "node ./esbuild.extension.mjs --watch & node ./esbuild.webview.mjs --watch",
     "package": "npm run build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:integration": "node ./out/test/runTest.js"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.8.0",
