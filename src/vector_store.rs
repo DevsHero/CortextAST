@@ -42,10 +42,19 @@ struct IndexStore {
 
 impl IndexStore {
     fn load(path: &Path) -> Self {
-        if let Ok(text) = std::fs::read_to_string(path) {
-            serde_json::from_str(&text).unwrap_or_default()
-        } else {
-            Self::default()
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(_) => return Self::default(), // file doesn't exist yet
+        };
+        match serde_json::from_str::<Self>(&text) {
+            Ok(store) => store,
+            Err(e) => {
+                eprintln!(
+                    "[neurosiphon] index corrupted ({}), rebuilding from scratch…",
+                    e
+                );
+                Self::default()
+            }
         }
     }
 
@@ -141,10 +150,14 @@ impl CodebaseIndex {
         out
     }
 
-    fn read_file_lossy(abs_path: &Path) -> Result<String> {
+    fn read_file_lossy(abs_path: &Path) -> Result<Option<String>> {
         let bytes = std::fs::read(abs_path)
             .with_context(|| format!("Failed to read {}", abs_path.display()))?;
-        Ok(String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string()))
+        // Binary detection: null bytes → skip embedding entirely.
+        if bytes.contains(&0u8) {
+            return Ok(None);
+        }
+        Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
     }
 
     /// Index a file from disk, re-using the cached embedding when nothing changed.
@@ -154,7 +167,10 @@ impl CodebaseIndex {
         if !self.should_reindex(&rel_norm, &new_meta) {
             return Ok(());
         }
-        let content = Self::read_file_lossy(abs_path)?;
+        let content = match Self::read_file_lossy(abs_path)? {
+            Some(c) => c,
+            None => return Ok(()), // binary file — skip embedding
+        };
         let snippet = Self::snippet_by_lines(&content, self.chunk_lines);
         if snippet.trim().is_empty() {
             return Ok(());
@@ -274,7 +290,7 @@ impl CodebaseIndex {
         let read_results: Vec<(String, PathBuf, String)> = dirty
             .par_iter()
             .filter_map(|(rel, abs)| {
-                let content = Self::read_file_lossy(abs).ok()?;
+                let content = Self::read_file_lossy(abs).ok()??; // None = binary, skip
                 Some((rel.clone(), abs.clone(), content))
             })
             .collect();

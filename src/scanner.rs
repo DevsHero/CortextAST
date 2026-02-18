@@ -201,7 +201,6 @@ pub fn scan_workspace(opts: &ScanOptions) -> Result<Vec<FileEntry>> {
         }
 
         let abs_path = dent.into_path();
-        // Overrides already handle excluded/junk patterns.
 
         let bytes = match std::fs::metadata(&abs_path).map(|m| m.len()) {
             Ok(b) => b,

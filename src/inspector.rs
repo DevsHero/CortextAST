@@ -445,8 +445,13 @@ pub fn render_skeleton(path: &Path) -> Result<String> {
         .ok_or_else(|| anyhow!("Unsupported file extension: {}", abs.display()))?;
     let language = driver.language_for_path(&abs);
 
-    let source_text = std::fs::read_to_string(&abs)
+    // Binary-safe read: detect null bytes before attempting UTF-8 decode.
+    let raw = std::fs::read(&abs)
         .with_context(|| format!("Failed to read {}", abs.display()))?;
+    if raw.contains(&0u8) {
+        return Ok("/* BINARY_FILE — skipped */\n".to_string());
+    }
+    let source_text = String::from_utf8_lossy(&raw).into_owned();
 
     // Safety net: bail out before Tree-sitter on minified/machine-generated content.
     if is_minified_or_generated(&source_text) {
