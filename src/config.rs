@@ -53,7 +53,7 @@ impl Default for VectorSearchConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            output_dir: PathBuf::from(".context-slicer"),
+            output_dir: PathBuf::from(".neurosiphon"),
             token_estimator: TokenEstimatorConfig::default(),
             skeleton_mode: true,
             vector_search: VectorSearchConfig::default(),
@@ -62,10 +62,12 @@ impl Default for Config {
 }
 
 pub fn load_config(repo_root: &Path) -> Config {
-    let path = repo_root.join(".context-slicer.json");
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Config::default();
-    };
+    let primary = repo_root.join(".neurosiphon.json");
+    let fallback = repo_root.join(".context-slicer.json");
+
+    let text = std::fs::read_to_string(&primary)
+        .or_else(|_| std::fs::read_to_string(&fallback));
+    let Ok(text) = text else { return Config::default() };
 
     serde_json::from_str::<Config>(&text).unwrap_or_else(|_| Config::default())
 }

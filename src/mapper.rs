@@ -823,16 +823,29 @@ fn clamp_label(name: &str) -> String {
 fn should_skip_dir_name(name: &str) -> bool {
     matches!(
         name,
-        ".git"
-            | ".vscode"
-            | "node_modules"
-            | "dist"
-            | "build"
-            | "target"
-            | ".next"
-            | ".turbo"
-            | ".context-slicer"
-            | ".cargo"
+        // VCS / editor
+        ".git" | ".vscode" | ".idea" | ".vs"
+        // JS / Node
+        | "node_modules" | "dist" | "build" | ".next" | ".nuxt" | ".svelte-kit" | ".turbo"
+        // Rust
+        | "target" | ".cargo"
+        // Python
+        | "__pycache__" | ".venv" | "venv" | ".env" | "env" | ".tox"
+        | ".pytest_cache" | ".mypy_cache" | ".ruff_cache" | "htmlcov"
+        | ".hypothesis" | "site-packages"
+        // Dart / Flutter
+        | ".dart_tool" | ".pub" | ".pub-cache" | ".flutter-plugins"
+        | ".flutter-plugins-dependencies"
+        // Go
+        | "vendor"
+        // Ruby
+        | ".bundle"
+        // Java / Kotlin
+        | ".gradle" | ".m2"
+        // Infra
+        | ".terraform" | ".serverless"
+        // Generic junk
+        | "tmp" | "temp" | "logs" | ".cache" | ".context-slicer" | ".neurosiphon"
     )
 }
 

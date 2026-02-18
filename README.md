@@ -1,129 +1,153 @@
-# context-slicer
+# 🧠 NeuroSiphon
 
-High-signal context slicing for coding agents.
+**Extract the Signal. Discard the Noise.**
+_The God-Tier Context Optimizer for LLMs. Pure Rust. Native MCP._
 
-What you get:
-- **Rust CLI** that emits `.context-slicer/active_context.xml`
-- **MCP stdio server** (JSON-RPC) so agents can call slicing + file reads
-- **Skeleton-first** output (function bodies pruned) + aggressive noise reduction
-- Optional **local vector search** (`--query`) backed by **LanceDB** + **Model2Vec**
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/Built%20with-Rust-orange)](https://www.rust-lang.org/)
+[![MCP Ready](https://img.shields.io/badge/MCP-Ready-blue)](https://modelcontextprotocol.io/)
+[![Build & Release](https://github.com/DevsHero/NeuroSiphon/actions/workflows/release.yml/badge.svg)](https://github.com/DevsHero/NeuroSiphon/actions/workflows/release.yml)
 
-## Status
-- Rust CLI + MCP server: usable
+---
 
-## Quick start
+## ⚡️ What is NeuroSiphon?
 
-### Build
-Requirements: Rust toolchain.
+**NeuroSiphon** is not just another file reader for AI. It is a **Context Refinery**.
 
-- Build (release): `cargo build --release`
+When you feed code to an LLM (Claude, ChatGPT), a huge chunk of your tokens are wasted on:
 
-### Generate context (baseline)
-From repo root:
+- ❌ Massive import lists (`import { a, b, c, ... }`)
+- ❌ Boilerplate comments
+- ❌ Indentation / whitespace
+- ❌ Implementation details irrelevant to your question
 
-- Slice a target folder: `./core/target/release/context-slicer --target . --budget-tokens 32000 --xml > /dev/null`
-- Slice a target folder: `./target/release/context-slicer --target . --budget-tokens 32000 --xml > /dev/null`
+**NeuroSiphon fixes this via “Nuclear Optimization”.**
+It parses your code (AST), understands structure, nukes the fat, and feeds the LLM only the **pure logic marrow** it needs to reason.
 
-Outputs:
-- `.context-slicer/active_context.xml`
-- `.context-slicer/active_context.meta.json`
+---
 
-### Generate context using vector search (hybrid)
-Use `--query` to index (incrementally) and slice only the most relevant files:
+## 👑 Why It’s the King of Context Efficiency
 
-- `./core/target/release/context-slicer --target . --query "vector search lancedb" --budget-tokens 32000 --xml > /dev/null`
-- `./target/release/context-slicer --target . --query "vector search lancedb" --budget-tokens 32000 --xml > /dev/null`
+| Feature | Standard Tools (copy/paste) | 🧠 NeuroSiphon |
+| :--- | :--- | :--- |
+| **Optimization** | None (full text) | **Nuclear** (AST skeleton + import nuking) |
+| **Search** | Grep / filename | **Hybrid** (vector semantics + graph ranking) |
+| **Token Usage** | Bloated | **Aggressively reduced** (often 40–60% less noise) |
+| **Speed** | Overhead-heavy | **Pure Rust** (fast scan + fast slice) |
+| **Privacy** | Often cloud-dependent | **100% local** (local embeddings + local index) |
 
-Tips:
-- To avoid pulling in unrelated areas, scope indexing to the subtree you care about:
-  - `./target/release/context-slicer --target src --query "vector search lancedb" --xml > /dev/null`
-- If you omit `--query-limit`, it auto-tunes based on your `--budget-tokens` (and config defaults).
+### 🛠️ Key Technologies
 
-## How it works
+1. **Nuclear Skeletonization**
+   - Functions collapse to signatures: `fn complex_logic() { /* ... */ }`
+   - Imports collapse to one line: `// ... (imports nuked)`
+   - Indentation is flattened to save whitespace tokens
 
-### Skeleton mode (default)
-For supported languages, we prune function / method bodies (keeps structure and signatures).
-We also aggressively reduce noise:
-- Import blocks are collapsed into a single hint line (counts)
-- Comment-only lines are removed (TODO/FIXME can be preserved)
-- Brace-based languages are flattened (leading indentation stripped)
+2. **Lightweight Hybrid Search**
+   - Uses **Model2Vec** (pure Rust, no ONNX runtime) for fast embeddings
+   - Uses a **flat-file JSON index** + brute-force cosine (trivial for typical repo sizes)
+   - Ranked against a dependency graph so you get **core logic first**
 
-Unsupported code-like languages fall back to a regex-based skeleton (keeps definition-ish lines).
+3. **Native MCP Server**
+   - Built for **Claude Desktop** / **Cursor** / any MCP client
+   - No plugins, no API keys, no cloud required
 
-### Vector search storage
-When `--query` is used:
-- Vectors are stored in `.context-slicer/db` (LanceDB)
-- Indexing is incremental via `.context-slicer/db/index_meta.json`
-- Embeddings come from `model2vec-rs` (Model2Vec) using `minishlab/potion-base-8M` by default
+---
 
-## CLI reference
+## 📦 Installation
 
-Common flags:
-- `--target <PATH>`: directory or file to slice (relative to repo root)
-- `--budget-tokens <N>`: approximate budget (default 32000)
-- `--full`: disable skeleton mode (emits full file contents)
-- `--xml`: print XML to stdout (still always writes `.context-slicer/active_context.xml`)
+### Option A — Pre-built Binary (fastest)
 
-Vector search:
-- `--query <TEXT>`: run vector search and slice only the most relevant files
-- `--query-limit <N>`: max number of unique file paths returned (if omitted, auto-tuned)
-- `--embed-model <MODEL_ID>`: override Model2Vec model (HF repo ID)
-- `--chunk-lines <N>`: override snippet size (lines per file) used for indexing
+Download the latest binary from [Releases](https://github.com/DevsHero/NeuroSiphon/releases/latest):
 
-MCP:
-- `context-slicer mcp`
+| Platform | Download |
+|---|---|
+| Linux x86_64 | `neurosiphon-linux-x86_64` |
+| Linux ARM64 | `neurosiphon-linux-aarch64` |
+| macOS Intel | `neurosiphon-macos-x86_64` |
+| macOS Apple Silicon | `neurosiphon-macos-aarch64` |
+| Windows x86_64 | `neurosiphon-windows-x86_64.exe` |
 
-## Config
-Optional `.context-slicer.json` in repo root:
+```bash
+# macOS / Linux — make executable
+chmod +x neurosiphon-*
+./neurosiphon-macos-aarch64 --help
+```
+
+### Option B — Build from Source
+
+```bash
+git clone https://github.com/DevsHero/NeuroSiphon.git
+cd NeuroSiphon
+cargo build --release
+# Binary: ./target/release/neurosiphon
+```
+
+See [BUILDING.md](BUILDING.md) for cross-compilation and platform-specific instructions.
+
+---
+
+## 🔌 MCP Setup
+
+Add to your MCP client config (example uses Claude Desktop style JSON):
 
 ```json
 {
-  "output_dir": ".context-slicer",
-  "skeleton_mode": true,
-  "vector_search": {
-    "model": "minishlab/potion-base-8M",
-    "chunk_lines": 40,
-    "default_query_limit": 30
-  },
-  "token_estimator": {
-    "chars_per_token": 4,
-    "max_file_bytes": 1048576
+  "mcpServers": {
+    "neurosiphon": {
+      "command": "/absolute/path/to/neurosiphon",
+      "args": ["mcp"]
+    }
   }
 }
 ```
 
-### Recommended workflow (best practice)
-Goal: pull only the relevant files, using as few tokens as possible.
+Restart your MCP client. That’s it.
 
-- Always scope `--target` to the smallest subtree you care about.
-  - Example: `--target src` instead of `--target .`
-- Use `--query` for “find the relevant area” and let the slicer enforce the token budget.
-  - Example (auto limit): `./target/release/context-slicer --target src --query "index meta lancedb" --budget-tokens 12000 --xml > /dev/null`
-- If recall is too low (misses files), raise `--budget-tokens` or set `--query-limit` explicitly.
-  - Example: `--query-limit 20`
-- If you do lots of retrieval queries, consider a retrieval-tuned model:
-  - Example: `--embed-model minishlab/potion-retrieval-32M`
+---
 
-## MCP server
-Start: `./target/release/context-slicer mcp`
+## 🎮 Usage
 
-Tools exposed:
-- `context_slicer_get_context_slice`
-- `context_slicer_get_repo_map`
-- `context_slicer_read_file_skeleton`
-- `context_slicer_read_file_full`
+### Automatic (via Chat)
 
-## Notes / troubleshooting
-- First `--query` run downloads a small embedding model (cached).
-- If you want maximum relevance, set `--target` to the sub-tree you care about.
+Example:
 
-## Benchmarks (sample)
-These are sample timings from one developer machine (macOS, release build). Your results will vary.
+> “@neurosiphon What is the authentication flow in this project?”
 
-- Repo-wide (`--target .`, `--budget-tokens 32000`)
-  - Baseline median: ~0.134s
-  - Vector (`--query "vector search lancedb"`, warm index) median: ~0.117s (~0.87×)
-  - Vector cold start (no `.context-slicer/db`): ~1.241s (includes initial indexing + model load)
-- Core-only (`--target core/src`, `--budget-tokens 12000`)
-  - Baseline median: ~0.077s
-  - Vector (`--query slicer`, warm index) median: ~0.057s (~0.74×)
+NeuroSiphon will:
+
+1. Vector-search for “authentication”
+2. Graph-rank the results (core logic > tests)
+3. Skeletonize and nuke imports to fit your token budget
+4. Return an optimized context slice
+
+### Manual (CLI)
+
+```bash
+# Optimized slice of the 'src' folder
+neurosiphon --target src --budget-tokens 32000 --xml
+
+# Semantic search for specific concepts
+neurosiphon --target . --query "database connection" --xml
+```
+
+---
+
+## 🏗️ Architecture
+
+NeuroSiphon drops heavy infra in favor of a compact, custom-built engine:
+
+- **Vector Store**: flat-file JSON index + brute-force cosine similarity
+- **Parser**: tree-sitter + safe fallbacks for broad language coverage
+- **Walker**: `ignore` crate that respects `.gitignore` and auto-skips high-noise dirs (`node_modules`, `target`, `.venv`, etc.)
+
+---
+
+## 🤝 Contributing
+
+PRs welcome.
+
+- Core: Rust (Tokio, Rayon, Model2Vec)
+- Focus: performance, compression ratio, multi-language correctness
+
+Crafted with 🦀 by DevsHero.

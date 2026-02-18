@@ -1,76 +1,272 @@
-name: release
-
-on:
-  push:
-    tags:
-      - "v*"
+name: Build & Release
 
 permissions:
   contents: write
 
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: "Force build regardless of commit message"
+        required: false
+        default: false
+        type: boolean
+
 jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # 1. Gate: only continue when commit message contains [build]
+  # ─────────────────────────────────────────────────────────────────────────
+  check-trigger:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.gate.outputs.should_build }}
+      version: ${{ steps.cargo_ver.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history for changelog
+
+      - name: Gate — check [build] in commit message
+        id: gate
+        run: |
+          COMMIT_MSG="${{ github.event.head_commit.message }}"
+          if [[ "$COMMIT_MSG" == *"[build]"* ]] || \
+             [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.force_build }}" == "true" ]]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "✅ Build triggered"
+          else
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "⏭️  Skipping: no [build] in commit message"
+          fi
+
+      - name: Extract version from Cargo.toml
+        id: cargo_ver
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | awk -F'"' '{print $2}')
+          if [[ -z "$VERSION" ]]; then
+            echo "❌ Could not extract version from Cargo.toml"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "📦 Version: $VERSION"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 2. Build matrix — cross-platform binaries
+  # ─────────────────────────────────────────────────────────────────────────
   build:
+    needs: check-trigger
+    if: needs.check-trigger.outputs.should_build == 'true'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          # Linux x86_64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: neurosiphon-linux-x86_64
+            binary: neurosiphon
+            use_cross: false
+
+          # Linux ARM64 (cross-compiled via cross + Docker)
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: neurosiphon-linux-aarch64
+            binary: neurosiphon
+            use_cross: true
+
+          # macOS Intel
+          - target: x86_64-apple-darwin
+            os: macos-13
+            artifact: neurosiphon-macos-x86_64
+            binary: neurosiphon
+            use_cross: false
+
+          # macOS Apple Silicon
+          - target: aarch64-apple-darwin
+            os: macos-14
+            artifact: neurosiphon-macos-aarch64
+            binary: neurosiphon
+            use_cross: false
+
+          # Windows x86_64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: neurosiphon-windows-x86_64
+            binary: neurosiphon.exe
+            use_cross: false
+
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: 22
-          cache: npm
+          targets: ${{ matrix.target }}
 
-      - name: Install
-        run: npm ci
-
-      - name: Build single binary
-        run: npm run build:binary
-
-      - name: Rename artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p release
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp dist/context-slicer.exe "release/context-slicer-${{ runner.os }}.exe"
-          else
-            cp dist/context-slicer "release/context-slicer-${{ runner.os }}"
-          fi
-
-      - name: Checksums
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd release
-          if command -v shasum >/dev/null 2>&1; then
-            shasum -a 256 * > SHA256SUMS
-          else
-            sha256sum * > SHA256SUMS
-          fi
-
-      - uses: actions/upload-artifact@v4
+      - name: Cache Cargo registry & build
+        uses: actions/cache@v4
         with:
-          name: context-slicer-${{ runner.os }}
-          path: release/
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
 
-  publish:
-    needs: build
+      # Install cross for ARM Linux cross-compilation
+      - name: Install cross
+        if: matrix.use_cross == true
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      # ── Build ──────────────────────────────────────────────────────────
+      - name: Build (cross)
+        if: matrix.use_cross == true
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build (cargo)
+        if: matrix.use_cross != true
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # ── Stage artifact ─────────────────────────────────────────────────
+      - name: Prepare artifact (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p staging
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "staging/${{ matrix.artifact }}"
+          chmod +x "staging/${{ matrix.artifact }}"
+
+      - name: Prepare artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force staging | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\${{ matrix.binary }}" "staging\${{ matrix.artifact }}.exe"
+
+      - name: Compute SHA256 (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd staging
+          sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
+          cat "${{ matrix.artifact }}.sha256"
+
+      - name: Compute SHA256 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cd staging
+          $hash = (Get-FileHash "${{ matrix.artifact }}.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  ${{ matrix.artifact }}.exe" | Out-File "${{ matrix.artifact }}.sha256" -Encoding ascii
+          Get-Content "${{ matrix.artifact }}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: staging/
+          retention-days: 1
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 3. Release — collect all binaries, generate changelog, publish
+  # ─────────────────────────────────────────────────────────────────────────
+  release:
+    needs: [check-trigger, build]
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check-trigger.outputs.version }}
 
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
         with:
-          path: artifacts
+          fetch-depth: 0
 
-      - name: Release
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: neurosiphon-*
+          merge-multiple: true
+          path: release/
+
+      - name: List release assets
+        run: ls -lh release/
+
+      - name: Merge SHA256 checksums
+        run: |
+          cd release
+          cat *.sha256 > sha256sums.txt
+          echo "── sha256sums.txt ──"
+          cat sha256sums.txt
+
+      - name: Build changelog from git log
+        id: changelog
+        run: |
+          # Collect commits since the previous tag (or last 30 if no prior tag)
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [[ -n "$PREV_TAG" ]]; then
+            RANGE="${PREV_TAG}..HEAD"
+          else
+            RANGE="HEAD~30..HEAD"
+          fi
+          LOG=$(git log "$RANGE" --pretty=format:"- %s (%h)" --no-merges 2>/dev/null || echo "- Initial release")
+          echo "changelog<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$LOG" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: v${{ env.VERSION }}
+          name: "NeuroSiphon v${{ env.VERSION }}"
+          body: |
+            ## 🧠 NeuroSiphon v${{ env.VERSION }}
+
+            High-performance LLM context optimizer — Pure Rust, Native MCP.
+
+            ### 📥 Download
+
+            | Platform | Binary |
+            |---|---|
+            | Linux x86_64 | `neurosiphon-linux-x86_64` |
+            | Linux ARM64  | `neurosiphon-linux-aarch64` |
+            | macOS Intel  | `neurosiphon-macos-x86_64` |
+            | macOS Apple Silicon | `neurosiphon-macos-aarch64` |
+            | Windows x86_64 | `neurosiphon-windows-x86_64.exe` |
+
+            Verify integrity with `sha256sums.txt`.
+
+            ### 🚀 Quick Start
+
+            ```bash
+            # macOS / Linux
+            chmod +x neurosiphon-*
+            ./neurosiphon-macos-aarch64 --help
+
+            # Add to MCP client (Claude Desktop / Cursor)
+            # Set binary path in your mcpServers config
+            ```
+
+            ### 📋 Changes
+            ${{ steps.changelog.outputs.changelog }}
+
+            ---
+            Full docs: https://github.com/DevsHero/NeuroSiphon
+          draft: false
+          prerelease: false
+          generate_release_notes: true
           files: |
-            artifacts/**/context-slicer-*
-            artifacts/**/SHA256SUMS
+            release/neurosiphon-linux-x86_64
+            release/neurosiphon-linux-aarch64
+            release/neurosiphon-macos-x86_64
+            release/neurosiphon-macos-aarch64
+            release/neurosiphon-windows-x86_64.exe
+            release/sha256sums.txt

@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use crate::config::load_config;
 use crate::inspector::render_skeleton;
 use crate::mapper::{build_repo_map, build_repo_map_scoped};
-use crate::slicer::slice_to_xml;
+use crate::slicer::{slice_paths_to_xml, slice_to_xml};
+use crate::scanner::{scan_workspace, ScanOptions};
+use crate::vector_store::{CodebaseIndex, IndexJob};
+use rayon::prelude::*;
 
 #[derive(Default)]
 pub struct ServerState {
@@ -35,17 +38,18 @@ impl ServerState {
                 "tools": [
                     {
                         "name": "get_context_slice",
-                        "description": "Generate an XML context slice for a target directory/file within a repo",
+                        "description": "Generate an XML context slice for a target directory/file within a repo. Supports optional semantic vector search via the `query` parameter.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "repoPath": { "type": "string" },
-                                "target": { "type": "string" },
-                                "budget_tokens": { "type": "integer", "exclusiveMinimum": 0 }
+                                "repoPath": { "type": "string", "description": "Absolute path to the repo root" },
+                                "target": { "type": "string", "description": "Relative path within the repo to slice (file or directory). Use '.' for whole repo." },
+                                "budget_tokens": { "type": "integer", "exclusiveMinimum": 0, "description": "Token budget (default 32000)" },
+                                "query": { "type": "string", "description": "Optional: semantic search query. When provided, returns only the most relevant files." },
+                                "query_limit": { "type": "integer", "description": "Max files to return for query mode (default auto-tuned)" }
                             },
                             "required": ["target"]
-                        },
-                        "execution": { "taskSupport": "forbidden" }
+                        }
                     },
                     {
                         "name": "get_repo_map",
@@ -53,11 +57,10 @@ impl ServerState {
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "repoPath": { "type": "string" },
+                                "repoPath": { "type": "string", "description": "Absolute path to the repo root" },
                                 "scope": { "type": "string", "description": "Optional subdirectory path to scope mapping" }
                             }
-                        },
-                        "execution": { "taskSupport": "forbidden" }
+                        }
                     },
                     {
                         "name": "read_file_skeleton",
@@ -65,12 +68,11 @@ impl ServerState {
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "repoPath": { "type": "string" },
-                                "path": { "type": "string" }
+                                "repoPath": { "type": "string", "description": "Absolute path to the repo root" },
+                                "path": { "type": "string", "description": "Path to the file (relative to repoPath, or absolute)" }
                             },
                             "required": ["path"]
-                        },
-                        "execution": { "taskSupport": "forbidden" }
+                        }
                     },
                     {
                         "name": "read_file_full",
@@ -78,12 +80,11 @@ impl ServerState {
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "repoPath": { "type": "string" },
-                                "path": { "type": "string" }
+                                "repoPath": { "type": "string", "description": "Absolute path to the repo root" },
+                                "path": { "type": "string", "description": "Path to the file (relative to repoPath, or absolute)" }
                             },
                             "required": ["path"]
-                        },
-                        "execution": { "taskSupport": "forbidden" }
+                        }
                     }
                 ]
             }
@@ -102,11 +103,11 @@ impl ServerState {
             })
         };
 
-        let err = |text: String| {
+        let err = |msg: String| {
             json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "result": { "content": [{"type":"text","text": text }], "isError": true }
+                "result": { "content": [{"type":"text","text": msg }], "isError": true }
             })
         };
 
@@ -119,6 +120,15 @@ impl ServerState {
                 let target = PathBuf::from(target_str);
                 let budget_tokens = args.get("budget_tokens").and_then(|v| v.as_u64()).unwrap_or(32_000) as usize;
                 let cfg = load_config(&repo_root);
+
+                // Optional vector search query.
+                if let Some(q) = args.get("query").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                    let query_limit = args.get("query_limit").and_then(|v| v.as_u64()).map(|n| n as usize);
+                    match self.run_query_slice(&repo_root, &target, q, query_limit, budget_tokens, &cfg) {
+                        Ok(xml) => return ok(xml),
+                        Err(e) => return err(format!("query slice failed: {e}")),
+                    }
+                }
 
                 match slice_to_xml(&repo_root, &target, budget_tokens, &cfg) {
                     Ok((xml, _meta)) => ok(xml),
@@ -153,7 +163,7 @@ impl ServerState {
                 let Some(p) = args.get("path").and_then(|v| v.as_str()) else {
                     return err("Missing path".to_string());
                 };
-                let abs = repo_root.join(p);
+                let abs = resolve_path(&repo_root, p);
 
                 match render_skeleton(&abs) {
                     Ok(s) => ok(s),
@@ -165,7 +175,7 @@ impl ServerState {
                 let Some(p) = args.get("path").and_then(|v| v.as_str()) else {
                     return err("Missing path".to_string());
                 };
-                let abs = repo_root.join(p);
+                let abs = resolve_path(&repo_root, p);
 
                 match std::fs::read_to_string(&abs).with_context(|| format!("Failed to read {}", abs.display())) {
                     Ok(s) => ok(s),
@@ -175,6 +185,96 @@ impl ServerState {
             _ => err(format!("Tool not found: {name}")),
         }
     }
+
+    /// Run vector-search-based slicing (query mode) from the MCP server.
+    fn run_query_slice(
+        &mut self,
+        repo_root: &PathBuf,
+        target: &PathBuf,
+        query: &str,
+        query_limit: Option<usize>,
+        budget_tokens: usize,
+        cfg: &crate::config::Config,
+    ) -> anyhow::Result<String> {
+        let opts = ScanOptions {
+            repo_root: repo_root.clone(),
+            target: target.clone(),
+            max_file_bytes: cfg.token_estimator.max_file_bytes,
+            exclude_dir_names: vec![
+                ".git".into(), "node_modules".into(), "dist".into(),
+                "target".into(), cfg.output_dir.to_string_lossy().to_string(),
+            ],
+        };
+        let entries = scan_workspace(&opts)?;
+
+        let db_dir = repo_root.join(&cfg.output_dir).join("db");
+        let model_id = cfg.vector_search.model.as_str();
+        let chunk_lines = cfg.vector_search.chunk_lines;
+        let mut index = CodebaseIndex::open(repo_root, &db_dir, model_id, chunk_lines)?;
+
+        let limit = query_limit.unwrap_or_else(|| {
+            let budget_based = (budget_tokens / 1_500).clamp(8, 60);
+            budget_based.min(cfg.vector_search.default_query_limit).max(1)
+        });
+        let max_candidates = (limit * 12).clamp(80, 400);
+        let terms: Vec<String> = query.split_whitespace()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| s.len() >= 2)
+            .collect();
+
+        let mut scored: Vec<(i32, usize)> = entries.iter().enumerate().map(|(i, e)| {
+            let rel = e.rel_path.to_string_lossy().replace('\\', "/");
+            (score_path(&rel, &terms), i)
+        }).collect();
+        scored.sort_by(|(sa, ia), (sb, ib)| sb.cmp(sa).then_with(|| entries[*ia].bytes.cmp(&entries[*ib].bytes)));
+
+        let mut to_index: Vec<(String, PathBuf)> = Vec::new();
+        for (_score, idx) in scored.iter().take(max_candidates) {
+            let e = &entries[*idx];
+            let rel = e.rel_path.to_string_lossy().replace('\\', "/");
+            if matches!(index.needs_reindex_path(&rel, &e.abs_path), Ok(true)) {
+                to_index.push((rel, e.abs_path.clone()));
+            }
+        }
+
+        let jobs: Vec<IndexJob> = to_index.par_iter().filter_map(|(rel, abs)| {
+            let bytes = std::fs::read(abs).ok()?;
+            let content = String::from_utf8(bytes)
+                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
+            Some(IndexJob { rel_path: rel.clone(), abs_path: abs.clone(), content })
+        }).collect();
+
+        let rt = tokio::runtime::Runtime::new()?;
+        let q_owned = query.to_string();
+        let rel_paths: Vec<String> = rt.block_on(async move {
+            let _ = index.index_jobs(&jobs, || {}).await;
+            index.search(&q_owned, limit).await.unwrap_or_default()
+        });
+
+        let (xml, _meta) = if rel_paths.is_empty() {
+            slice_to_xml(repo_root, target, budget_tokens, cfg)?
+        } else {
+            slice_paths_to_xml(repo_root, &rel_paths, budget_tokens, cfg)?
+        };
+        Ok(xml)
+    }
+}
+
+/// Resolve a path parameter: if absolute, use as-is; otherwise join to repo_root.
+fn resolve_path(repo_root: &PathBuf, p: &str) -> PathBuf {
+    let pb = PathBuf::from(p);
+    if pb.is_absolute() { pb } else { repo_root.join(p) }
+}
+
+fn score_path(rel_path: &str, terms: &[String]) -> i32 {
+    let p = rel_path.to_ascii_lowercase();
+    let filename = p.rsplit('/').next().unwrap_or(&p);
+    let mut score = 0i32;
+    for t in terms {
+        if filename.contains(t.as_str()) { score += 30; }
+        else if p.contains(t.as_str()) { score += 10; }
+    }
+    score
 }
 
 pub fn run_stdio_server() -> Result<()> {
@@ -194,6 +294,13 @@ pub fn run_stdio_server() -> Result<()> {
             Err(_) => continue,
         };
 
+        // JSON-RPC notifications have no "id" field — don't respond.
+        let has_id = msg.get("id").is_some();
+        if !has_id {
+            // Side-effect-only notifications (initialize ack, cancel, log, etc.) — ignore.
+            continue;
+        }
+
         let id = msg.get("id").cloned().unwrap_or(json!(null));
         let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
@@ -204,18 +311,34 @@ pub fn run_stdio_server() -> Result<()> {
                 "result": {
                     "protocolVersion": msg.get("params").and_then(|p| p.get("protocolVersion")).cloned().unwrap_or(json!("2024-11-05")),
                     "capabilities": { "tools": { "listChanged": true } },
-                    "serverInfo": { "name": "context-slicer-rs", "version": "0.1.0" }
+                    "serverInfo": { "name": "neurosiphon-rs", "version": "0.2.0" }
                 }
+            }),
+            "ping" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {}
             }),
             "tools/list" => state.tool_list(id),
             "tools/call" => {
                 let params = msg.get("params").cloned().unwrap_or(json!({}));
                 state.tool_call(id, &params)
             }
+            // Return empty lists for resources/prompts — we don't implement them.
+            "resources/list" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "resources": [] }
+            }),
+            "prompts/list" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "prompts": [] }
+            }),
             _ => json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "error": { "code": -32601, "message": "Method not found" }
+                "error": { "code": -32601, "message": format!("Method not found: {method}") }
             }),
         };
 

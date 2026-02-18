@@ -1,22 +1,22 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use context_slicer::config::load_config;
-use context_slicer::inspector::analyze_file;
-use context_slicer::inspector::render_skeleton;
-use context_slicer::mapper::{build_map_from_manifests, build_module_graph, build_repo_map, build_repo_map_scoped};
-use context_slicer::server::run_stdio_server;
-use context_slicer::slicer::{slice_paths_to_xml, slice_to_xml};
-use context_slicer::scanner::{scan_workspace, ScanOptions};
-use context_slicer::vector_store::{CodebaseIndex, IndexJob};
+use neurosiphon::config::load_config;
+use neurosiphon::inspector::analyze_file;
+use neurosiphon::inspector::render_skeleton;
+use neurosiphon::mapper::{build_map_from_manifests, build_module_graph, build_repo_map, build_repo_map_scoped};
+use neurosiphon::server::run_stdio_server;
+use neurosiphon::slicer::{slice_paths_to_xml, slice_to_xml};
+use neurosiphon::scanner::{scan_workspace, ScanOptions};
+use neurosiphon::vector_store::{CodebaseIndex, IndexJob};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use serde_json::json;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "context-slicer")]
-#[command(version = "0.1.0")]
-#[command(about = "High-performance context slicer (Rust)")]
+#[command(name = "neurosiphon")]
+#[command(version)]
+#[command(about = "High-performance LLM context optimizer (Pure Rust MCP server)")]
 struct Cli {
     /// Output a repo map JSON to stdout (nodes + edges)
     #[arg(long)]
@@ -65,7 +65,7 @@ struct Cli {
     /// Override snippet size (lines per file) when building the vector index.
     #[arg(long, value_name = "N")]
     chunk_lines: Option<usize>,
-    /// Output XML to stdout (also writes .context-slicer/active_context.xml)
+    /// Output XML to stdout (also writes {output_dir}/active_context.xml)
     #[arg(long)]
     xml: bool,
 

@@ -26,11 +26,27 @@ fn repomix_default_overrides(repo_root: &Path, exclude_dir_names: &[String]) -> 
     ob.add("**/*.jpeg")?;
     ob.add("**/*.gif")?;
 
-    // Common build outputs / heavy dirs
+    // Common junk file types (binaries, generated, etc.)
+    ob.add("**/*.pyc")?;
+    ob.add("**/*.pyo")?;
+    ob.add("**/*.pyd")?;
+    ob.add("**/*.class")?;
+    ob.add("**/*.o")?;
+    ob.add("**/*.a")?;
+    ob.add("**/*.so")?;
+    ob.add("**/*.dylib")?;
+    ob.add("**/*.dll")?;
+    ob.add("**/*.exe")?;
+    ob.add("**/*.wasm")?;
+    ob.add("**/*.min.js")?;
+    ob.add("**/*.min.css")?;
+
+    // Common build outputs / heavy dirs (multi-language)
     for d in [
+        // VCS
         ".git",
+        // JS/TS
         "node_modules",
-        "target",
         "dist",
         "build",
         "coverage",
@@ -39,7 +55,45 @@ fn repomix_default_overrides(repo_root: &Path, exclude_dir_names: &[String]) -> 
         ".vscode-test",
         ".vscode",
         "out",
+        ".neurosiphon",
+        ".turbo",
+        ".svelte-kit",
+        // Rust
+        "target",
+        // Python
+        "__pycache__",
+        ".venv",
+        "venv",
+        ".env",
+        "env",
+        ".tox",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        "htmlcov",
+        ".hypothesis",
+        "site-packages",
+        // Dart / Flutter
+        ".dart_tool",
+        ".pub",
+        ".pub-cache",
+        ".flutter-plugins",
+        ".flutter-plugins-dependencies",
+        // Go
+        "vendor",
+        // Ruby
+        ".bundle",
+        // Java / JVM
+        ".gradle",
+        ".m2",
+        // Misc
         ".context-slicer",
+        ".terraform",
+        ".serverless",
+        "tmp",
+        "temp",
+        "logs",
+        ".cache",
     ] {
         ob.add(&format!("**/{d}"))?;
         ob.add(&format!("**/{d}/**"))?;
