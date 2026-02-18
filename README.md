@@ -115,7 +115,7 @@ Add to your MCP client config (example uses Claude Desktop style JSON):
 }
 ```
 
-Restart your MCP client. That’s it.
+Restart your MCP client. That’s it. 
 
 See [MCP_SETUP.md](docs/MCP_SETUP.md)
 
