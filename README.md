@@ -67,6 +67,22 @@ It parses your code (AST), understands structure, nukes the fat, and feeds the L
 
 ---
 
+## 🏆 NeuroSiphon v1.0.0: Official Benchmarks
+
+Target: NeuroSiphon Source Code (10+ Rust Files, Core Logic)
+
+Hardware: Apple M1 Max / 32GB RAM
+
+Evidence (CLI run screenshot): [screenshot/Screenshot 2569-02-18 at 12.35.37.png](screenshot/Screenshot%202569-02-18%20at%2012.35.37.png)
+
+| Metric | Raw Source (Baseline) | 🧠 NeuroSiphon (Nuclear) | Improvement |
+|---|---:|---:|---:|
+| Total Size | 127,536 Bytes | 9,842 Bytes | 92.3% Smaller |
+| Est. Tokens (≈ bytes/4) | ~31,884 tokens | ~2,460 tokens | 29,424 Tokens Saved |
+| Processing Time | N/A | 0.07 Seconds | Instant (JIT) |
+| Information Density | Low (Noise Heavy) | God Tier (Pure Logic) | Refined |
+| LLM Context Space | 100% Full | 7.7% Used | 92.3% Free Space |
+
 ## 📦 Installation
 
 ### Option A — Pre-built Binary (fastest)
