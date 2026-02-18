@@ -102,7 +102,7 @@ See [BUILDING.md](docs/BUILDING.md) for cross-compilation and platform-specific 
 
 ## 🔌 MCP Setup
 
-Add to your MCP client config (example uses Claude Desktop style JSON):
+Add to your MCP client config (example uses Claude Desktop style JSON): 
 
 ```json
 {
