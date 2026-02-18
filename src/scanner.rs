@@ -87,7 +87,7 @@ fn repomix_default_overrides(repo_root: &Path, exclude_dir_names: &[String]) -> 
         ".gradle",
         ".m2",
         // Misc
-        ".context-slicer",
+        ".neurosiphon",
         ".terraform",
         ".serverless",
         "tmp",

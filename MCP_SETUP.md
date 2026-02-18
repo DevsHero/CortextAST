@@ -54,7 +54,7 @@ Restart your MCP client.
 ## 4) Optional Repo Config
 
 NeuroSiphon reads `.neurosiphon.json` from the target repo root.
-For backward compatibility it also accepts `.context-slicer.json`.
+It only accepts `.neurosiphon.json`.
 
 Example:
 

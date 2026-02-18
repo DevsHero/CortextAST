@@ -845,7 +845,7 @@ fn should_skip_dir_name(name: &str) -> bool {
         // Infra
         | ".terraform" | ".serverless"
         // Generic junk
-        | "tmp" | "temp" | "logs" | ".cache" | ".context-slicer" | ".neurosiphon"
+        | "tmp" | "temp" | "logs" | ".cache" | ".neurosiphon"
     )
 }
 

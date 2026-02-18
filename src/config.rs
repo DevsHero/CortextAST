@@ -63,10 +63,8 @@ impl Default for Config {
 
 pub fn load_config(repo_root: &Path) -> Config {
     let primary = repo_root.join(".neurosiphon.json");
-    let fallback = repo_root.join(".context-slicer.json");
 
-    let text = std::fs::read_to_string(&primary)
-        .or_else(|_| std::fs::read_to_string(&fallback));
+    let text = std::fs::read_to_string(&primary);
     let Ok(text) = text else { return Config::default() };
 
     serde_json::from_str::<Config>(&text).unwrap_or_else(|_| Config::default())
