@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use tree_sitter::{Language, Node, Parser, Query, QueryCursor};
+use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::universal::render_universal_skeleton;
 
@@ -462,7 +462,7 @@ pub fn render_skeleton(path: &Path) -> Result<String> {
 
     let mut parser = Parser::new();
     parser
-        .set_language(language)
+        .set_language(&language)
         .context("Failed to set tree-sitter language")?;
     let tree = parser
         .parse(source_text.as_str(), None)
@@ -496,7 +496,7 @@ pub fn render_skeleton_from_source(path: &Path, source_text: &str) -> Result<Str
 
     let mut parser = Parser::new();
     parser
-        .set_language(language)
+        .set_language(&language)
         .context("Failed to set tree-sitter language")?;
     let tree = parser
         .parse(source_text, None)
@@ -554,7 +554,7 @@ pub fn try_render_skeleton_from_source(path: &Path, source_text: &str) -> Result
 
     let mut parser = Parser::new();
     parser
-        .set_language(language)
+        .set_language(&language)
         .context("Failed to set tree-sitter language")?;
 
     let Some(tree) = parser.parse(source_text, None) else {
@@ -666,7 +666,7 @@ impl LanguageDriver for RustDriver {
     }
 
     fn find_imports(&self, _path: &Path, source: &[u8], root: Node, language: Language) -> Result<Vec<String>> {
-        run_query_strings(source, root, language, r#"(use_declaration argument: (_) @path)"#, "path")
+        run_query_strings(source, root, &language, r#"(use_declaration argument: (_) @path)"#, "path")
     }
 
     fn find_exports(&self, _path: &Path, source: &[u8], root: Node, language: Language) -> Result<Vec<String>> {
@@ -674,7 +674,7 @@ impl LanguageDriver for RustDriver {
         exports.extend(run_query_strings(
             source,
             root,
-            language,
+            &language,
             r#"(
                 function_item
                                     (visibility_modifier) @vis
@@ -686,7 +686,7 @@ impl LanguageDriver for RustDriver {
         exports.extend(run_query_strings(
             source,
             root,
-            language,
+            &language,
             r#"(
                 struct_item
                                     (visibility_modifier) @vis
@@ -698,7 +698,7 @@ impl LanguageDriver for RustDriver {
         exports.extend(run_query_strings(
             source,
             root,
-            language,
+            &language,
             r#"(
                 enum_item
                                     (visibility_modifier) @vis
@@ -710,7 +710,7 @@ impl LanguageDriver for RustDriver {
         exports.extend(run_query_strings(
             source,
             root,
-            language,
+            &language,
             r#"(
                 trait_item
                                     (visibility_modifier) @vis
@@ -731,7 +731,7 @@ impl LanguageDriver for RustDriver {
         language: Language,
     ) -> Result<Vec<(usize, usize, String)>> {
         // Only function bodies. We do NOT prune impl/trait blocks; their methods will be pruned.
-        let bodies = run_query_byte_ranges(source, root, language, include_str!("../queries/rust_prune.scm"), "body")?;
+        let bodies = run_query_byte_ranges(source, root, &language, include_str!("../queries/rust_prune.scm"), "body")?;
         Ok(bodies
             .into_iter()
             .map(|(s, e)| (s, e, "{ /* ... */ }".to_string()))
@@ -743,7 +743,7 @@ impl LanguageDriver for RustDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(function_item name: (identifier) @name) @def"#,
             "function",
             true,
@@ -751,7 +751,7 @@ impl LanguageDriver for RustDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(struct_item name: (type_identifier) @name) @def"#,
             "struct",
             false,
@@ -759,7 +759,7 @@ impl LanguageDriver for RustDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(enum_item name: (type_identifier) @name) @def"#,
             "enum",
             false,
@@ -767,7 +767,7 @@ impl LanguageDriver for RustDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(trait_item name: (type_identifier) @name) @def"#,
             "trait",
             false,
@@ -805,7 +805,7 @@ impl LanguageDriver for TypeScriptDriver {
     }
 
     fn find_imports(&self, _path: &Path, source: &[u8], root: Node, language: Language) -> Result<Vec<String>> {
-        let import_srcs = run_query_strings(source, root, language, r#"(import_statement source: (string) @src)"#, "src")?;
+        let import_srcs = run_query_strings(source, root, &language, r#"(import_statement source: (string) @src)"#, "src")?;
         Ok(import_srcs.into_iter().map(|s| strip_string_quotes(&s)).collect())
     }
 
@@ -815,7 +815,7 @@ impl LanguageDriver for TypeScriptDriver {
         exports.extend(run_query_strings(
             source,
             root,
-            language,
+            &language,
             r#"(export_statement declaration: (function_declaration name: (identifier) @name))"#,
             "name",
         )?);
@@ -823,7 +823,7 @@ impl LanguageDriver for TypeScriptDriver {
         exports.extend(run_query_strings(
             source,
             root,
-            language,
+            &language,
             r#"(export_statement declaration: (class_declaration name: (type_identifier) @name))"#,
             "name",
         )?);
@@ -831,7 +831,7 @@ impl LanguageDriver for TypeScriptDriver {
         exports.extend(run_query_strings(
             source,
             root,
-            language,
+            &language,
             r#"(export_statement declaration: (lexical_declaration (variable_declarator name: (identifier) @name)))"#,
             "name",
         )?);
@@ -839,7 +839,7 @@ impl LanguageDriver for TypeScriptDriver {
         exports.extend(run_query_strings(
             source,
             root,
-            language,
+            &language,
             r#"(export_statement (export_clause (export_specifier name: (identifier) @name)))"#,
             "name",
         )?);
@@ -853,7 +853,7 @@ impl LanguageDriver for TypeScriptDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(function_declaration name: (identifier) @name) @def"#,
             "function",
             true,
@@ -862,7 +862,7 @@ impl LanguageDriver for TypeScriptDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(lexical_declaration (variable_declarator name: (identifier) @name value: (arrow_function))) @def"#,
             "function",
             true,
@@ -871,7 +871,7 @@ impl LanguageDriver for TypeScriptDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(class_declaration name: (type_identifier) @name) @def"#,
             "class",
             false,
@@ -880,7 +880,7 @@ impl LanguageDriver for TypeScriptDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(method_definition name: (property_identifier) @name) @def"#,
             "method",
             true,
@@ -900,7 +900,7 @@ impl LanguageDriver for TypeScriptDriver {
         // Focus on statement blocks for functions/methods. Skip arbitrary blocks.
         let mut out: Vec<(usize, usize, String)> = Vec::new();
 
-        let bodies = run_query_byte_ranges(source, root, language, include_str!("../queries/ts_prune.scm"), "body")?;
+        let bodies = run_query_byte_ranges(source, root, &language, include_str!("../queries/ts_prune.scm"), "body")?;
         for (s, e) in bodies {
             out.push((s, e, "{ /* ... */ }".to_string()));
         }
@@ -931,7 +931,7 @@ impl LanguageDriver for PythonDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(function_definition name: (identifier) @name) @def"#,
             "function",
             true,
@@ -939,7 +939,7 @@ impl LanguageDriver for PythonDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(class_definition name: (identifier) @name) @def"#,
             "class",
             false,
@@ -956,7 +956,7 @@ impl LanguageDriver for PythonDriver {
         language: Language,
     ) -> Result<Vec<(usize, usize, String)>> {
         // Replace function/class suite blocks with an indented "..." line.
-        let bodies = run_query_byte_ranges(source, root, language, include_str!("../queries/py_prune.scm"), "body")?;
+        let bodies = run_query_byte_ranges(source, root, &language, include_str!("../queries/py_prune.scm"), "body")?;
         let mut out: Vec<(usize, usize, String)> = Vec::new();
         for (s, e) in bodies {
             let indent = line_indent_at_byte(source_text, s);
@@ -996,14 +996,14 @@ impl LanguageDriver for GoDriver {
         out.extend(run_query_strings(
             source,
             root,
-            language,
+            &language,
             r#"(import_spec (interpreted_string_literal) @src)"#,
             "src",
         )?);
         out.extend(run_query_strings(
             source,
             root,
-            language,
+            &language,
             r#"(import_spec (raw_string_literal) @src)"#,
             "src",
         )?);
@@ -1016,21 +1016,21 @@ impl LanguageDriver for GoDriver {
         exports.extend(run_query_strings(
             source,
             root,
-            language,
+            &language,
             r#"(function_declaration name: (identifier) @name)"#,
             "name",
         )?);
         exports.extend(run_query_strings(
             source,
             root,
-            language,
+            &language,
             r#"(method_declaration name: (field_identifier) @name)"#,
             "name",
         )?);
         exports.extend(run_query_strings(
             source,
             root,
-            language,
+            &language,
             r#"(type_spec name: (type_identifier) @name)"#,
             "name",
         )?);
@@ -1044,7 +1044,7 @@ impl LanguageDriver for GoDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(function_declaration name: (identifier) @name) @def"#,
             "function",
             true,
@@ -1052,7 +1052,7 @@ impl LanguageDriver for GoDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(method_declaration name: (field_identifier) @name) @def"#,
             "method",
             true,
@@ -1060,7 +1060,7 @@ impl LanguageDriver for GoDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(type_spec name: (type_identifier) @name) @def"#,
             "type",
             false,
@@ -1076,7 +1076,7 @@ impl LanguageDriver for GoDriver {
         root: Node,
         language: Language,
     ) -> Result<Vec<(usize, usize, String)>> {
-        let bodies = run_query_byte_ranges(source, root, language, include_str!("../queries/go_prune.scm"), "body")?;
+        let bodies = run_query_byte_ranges(source, root, &language, include_str!("../queries/go_prune.scm"), "body")?;
         Ok(bodies
             .into_iter()
             .map(|(s, e)| (s, e, "{ /* ... */ }".to_string()))
@@ -1111,7 +1111,7 @@ impl LanguageDriver for DartDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(class_definition name: (identifier) @name) @def"#,
             "class",
             false,
@@ -1119,7 +1119,7 @@ impl LanguageDriver for DartDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(enum_declaration name: (identifier) @name) @def"#,
             "enum",
             false,
@@ -1127,7 +1127,7 @@ impl LanguageDriver for DartDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(mixin_declaration (identifier) @name) @def"#,
             "mixin",
             false,
@@ -1135,7 +1135,7 @@ impl LanguageDriver for DartDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(extension_declaration name: (identifier) @name) @def"#,
             "extension",
             false,
@@ -1143,7 +1143,7 @@ impl LanguageDriver for DartDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(type_alias (type_identifier) @name) @def"#,
             "type",
             false,
@@ -1153,7 +1153,7 @@ impl LanguageDriver for DartDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(function_signature name: (identifier) @name) @def"#,
             "function",
             true,
@@ -1163,7 +1163,7 @@ impl LanguageDriver for DartDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(method_signature (function_signature name: (identifier) @name)) @def"#,
             "method",
             true,
@@ -1171,7 +1171,7 @@ impl LanguageDriver for DartDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(method_signature (getter_signature name: (identifier) @name)) @def"#,
             "method",
             true,
@@ -1179,7 +1179,7 @@ impl LanguageDriver for DartDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(method_signature (setter_signature name: (identifier) @name)) @def"#,
             "method",
             true,
@@ -1187,7 +1187,7 @@ impl LanguageDriver for DartDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(method_signature (constructor_signature name: (identifier) @name)) @def"#,
             "method",
             true,
@@ -1195,7 +1195,7 @@ impl LanguageDriver for DartDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(method_signature (factory_constructor_signature (identifier) @name)) @def"#,
             "method",
             true,
@@ -1214,7 +1214,7 @@ impl LanguageDriver for DartDriver {
     ) -> Result<Vec<(usize, usize, String)>> {
         // Dart function/method bodies are represented as `function_body` nodes.
         // We only prune block-bodied functions (skip `=> expr;` forms for now).
-        let bodies = run_query_byte_ranges(source, root, language, include_str!("../queries/dart_prune.scm"), "body")?;
+        let bodies = run_query_byte_ranges(source, root, &language, include_str!("../queries/dart_prune.scm"), "body")?;
         Ok(bodies
             .into_iter()
             .map(|(s, e)| (s, e, "{ /* ... */ }".to_string()))
@@ -1250,7 +1250,7 @@ impl LanguageDriver for JavaDriver {
         out.extend(run_query_strings(
             source,
             root,
-            language,
+            &language,
             r#"(import_declaration (scoped_identifier) @path)"#,
             "path",
         )?);
@@ -1263,7 +1263,7 @@ impl LanguageDriver for JavaDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(class_declaration (identifier) @name) @def"#,
             "class",
             false,
@@ -1271,7 +1271,7 @@ impl LanguageDriver for JavaDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(interface_declaration (identifier) @name) @def"#,
             "interface",
             false,
@@ -1279,7 +1279,7 @@ impl LanguageDriver for JavaDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(enum_declaration name: (identifier) @name) @def"#,
             "enum",
             false,
@@ -1288,7 +1288,7 @@ impl LanguageDriver for JavaDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(method_declaration (identifier) @name) @def"#,
             "method",
             true,
@@ -1297,7 +1297,7 @@ impl LanguageDriver for JavaDriver {
         symbols.extend(run_query(
             source,
             root,
-            language,
+            &language,
             r#"(constructor_declaration (identifier) @name) @def"#,
             "constructor",
             true,
@@ -1314,7 +1314,7 @@ impl LanguageDriver for JavaDriver {
         root: Node,
         language: Language,
     ) -> Result<Vec<(usize, usize, String)>> {
-        let bodies = run_query_byte_ranges(source, root, language, include_str!("../queries/java_prune.scm"), "body")?;
+        let bodies = run_query_byte_ranges(source, root, &language, include_str!("../queries/java_prune.scm"), "body")?;
         Ok(bodies
             .into_iter()
             .map(|(s, e)| (s, e, "{ /* ... */ }".to_string()))
@@ -1345,22 +1345,22 @@ impl LanguageDriver for CSharpDriver {
 
     fn find_imports(&self, _path: &Path, source: &[u8], root: Node, language: Language) -> Result<Vec<String>> {
         let mut out: Vec<String> = Vec::new();
-        out.extend(run_query_strings(source, root, language, r#"(using_directive (identifier) @path)"#, "path")?);
-        out.extend(run_query_strings(source, root, language, r#"(using_directive (qualified_name) @path)"#, "path")?);
-        out.extend(run_query_strings(source, root, language, r#"(using_directive (alias_qualified_name) @path)"#, "path")?);
+        out.extend(run_query_strings(source, root, &language, r#"(using_directive (identifier) @path)"#, "path")?);
+        out.extend(run_query_strings(source, root, &language, r#"(using_directive (qualified_name) @path)"#, "path")?);
+        out.extend(run_query_strings(source, root, &language, r#"(using_directive (alias_qualified_name) @path)"#, "path")?);
         Ok(out)
     }
 
     fn extract_skeleton(&self, _path: &Path, source: &[u8], root: Node, language: Language) -> Result<Vec<Symbol>> {
         let mut symbols: Vec<Symbol> = Vec::new();
 
-        symbols.extend(run_query(source, root, language, r#"(class_declaration name: (identifier) @name) @def"#, "class", false)?);
-        symbols.extend(run_query(source, root, language, r#"(struct_declaration name: (identifier) @name) @def"#, "struct", false)?);
-        symbols.extend(run_query(source, root, language, r#"(interface_declaration name: (identifier) @name) @def"#, "interface", false)?);
-        symbols.extend(run_query(source, root, language, r#"(enum_declaration name: (identifier) @name) @def"#, "enum", false)?);
+        symbols.extend(run_query(source, root, &language, r#"(class_declaration name: (identifier) @name) @def"#, "class", false)?);
+        symbols.extend(run_query(source, root, &language, r#"(struct_declaration name: (identifier) @name) @def"#, "struct", false)?);
+        symbols.extend(run_query(source, root, &language, r#"(interface_declaration name: (identifier) @name) @def"#, "interface", false)?);
+        symbols.extend(run_query(source, root, &language, r#"(enum_declaration name: (identifier) @name) @def"#, "enum", false)?);
 
-        symbols.extend(run_query(source, root, language, r#"(method_declaration name: (identifier) @name) @def"#, "method", true)?);
-        symbols.extend(run_query(source, root, language, r#"(constructor_declaration name: (identifier) @name) @def"#, "constructor", true)?);
+        symbols.extend(run_query(source, root, &language, r#"(method_declaration name: (identifier) @name) @def"#, "method", true)?);
+        symbols.extend(run_query(source, root, &language, r#"(constructor_declaration name: (identifier) @name) @def"#, "constructor", true)?);
 
         Ok(symbols)
     }
@@ -1373,7 +1373,7 @@ impl LanguageDriver for CSharpDriver {
         root: Node,
         language: Language,
     ) -> Result<Vec<(usize, usize, String)>> {
-        let bodies = run_query_byte_ranges(source, root, language, include_str!("../queries/csharp_prune.scm"), "body")?;
+        let bodies = run_query_byte_ranges(source, root, &language, include_str!("../queries/csharp_prune.scm"), "body")?;
         Ok(bodies
             .into_iter()
             .map(|(s, e)| (s, e, "{ /* ... */ }".to_string()))
@@ -1399,18 +1399,18 @@ impl LanguageDriver for PhpDriver {
     }
 
     fn language_for_path(&self, _path: &Path) -> Language {
-        tree_sitter_php::language_php()
+        tree_sitter_php::LANGUAGE_PHP.into()
     }
 
     fn extract_skeleton(&self, _path: &Path, source: &[u8], root: Node, language: Language) -> Result<Vec<Symbol>> {
         let mut symbols: Vec<Symbol> = Vec::new();
 
-        symbols.extend(run_query(source, root, language, r#"(class_declaration name: (name) @name) @def"#, "class", false)?);
-        symbols.extend(run_query(source, root, language, r#"(interface_declaration name: (name) @name) @def"#, "interface", false)?);
-        symbols.extend(run_query(source, root, language, r#"(trait_declaration name: (name) @name) @def"#, "trait", false)?);
+        symbols.extend(run_query(source, root, &language, r#"(class_declaration name: (name) @name) @def"#, "class", false)?);
+        symbols.extend(run_query(source, root, &language, r#"(interface_declaration name: (name) @name) @def"#, "interface", false)?);
+        symbols.extend(run_query(source, root, &language, r#"(trait_declaration name: (name) @name) @def"#, "trait", false)?);
 
-        symbols.extend(run_query(source, root, language, r#"(function_definition name: (name) @name) @def"#, "function", true)?);
-        symbols.extend(run_query(source, root, language, r#"(method_declaration name: (name) @name) @def"#, "method", true)?);
+        symbols.extend(run_query(source, root, &language, r#"(function_definition name: (name) @name) @def"#, "function", true)?);
+        symbols.extend(run_query(source, root, &language, r#"(method_declaration name: (name) @name) @def"#, "method", true)?);
 
         Ok(symbols)
     }
@@ -1423,7 +1423,7 @@ impl LanguageDriver for PhpDriver {
         root: Node,
         language: Language,
     ) -> Result<Vec<(usize, usize, String)>> {
-        let bodies = run_query_byte_ranges(source, root, language, include_str!("../queries/php_prune.scm"), "body")?;
+        let bodies = run_query_byte_ranges(source, root, &language, include_str!("../queries/php_prune.scm"), "body")?;
         Ok(bodies
             .into_iter()
             .map(|(s, e)| (s, e, "{ /* ... */ }".to_string()))
@@ -1434,7 +1434,7 @@ impl LanguageDriver for PhpDriver {
 fn run_query_byte_ranges(
     source: &[u8],
     root: Node,
-    language: Language,
+    language: &Language,
     query_src: &str,
     cap: &str,
 ) -> Result<Vec<(usize, usize)>> {
@@ -1442,9 +1442,10 @@ fn run_query_byte_ranges(
     let mut cursor = QueryCursor::new();
     let mut out: Vec<(usize, usize)> = Vec::new();
 
-    for m in cursor.matches(&query, root, source) {
+    let mut matches = cursor.matches(&query, root, source);
+    while let Some(m) = matches.next() {
         for cap0 in m.captures {
-            let cap_name = query.capture_names()[cap0.index as usize].as_str();
+            let cap_name = query.capture_names()[cap0.index as usize];
             if cap_name != cap {
                 continue;
             }
@@ -1504,14 +1505,15 @@ fn strip_string_quotes(s: &str) -> String {
     t.to_string()
 }
 
-fn run_query_strings(source: &[u8], root: Node, language: Language, query_src: &str, cap: &str) -> Result<Vec<String>> {
+fn run_query_strings(source: &[u8], root: Node, language: &Language, query_src: &str, cap: &str) -> Result<Vec<String>> {
     let query = Query::new(language, query_src).context("Failed to compile tree-sitter query")?;
     let mut cursor = QueryCursor::new();
 
     let mut out: Vec<String> = Vec::new();
-    for m in cursor.matches(&query, root, source) {
+    let mut matches = cursor.matches(&query, root, source);
+    while let Some(m) = matches.next() {
         for cap0 in m.captures {
-            let cap_name = query.capture_names()[cap0.index as usize].as_str();
+            let cap_name = query.capture_names()[cap0.index as usize];
             if cap_name != cap {
                 continue;
             }
@@ -1533,7 +1535,7 @@ fn dedup_sorted(mut v: Vec<String>) -> Vec<String> {
 fn run_query(
     source: &[u8],
     root: Node,
-    language: Language,
+    language: &Language,
     query_src: &str,
     kind: &str,
     include_signature: bool,
@@ -1543,12 +1545,13 @@ fn run_query(
 
     let mut out: Vec<Symbol> = Vec::new();
 
-    for m in cursor.matches(&query, root, source) {
+    let mut matches = cursor.matches(&query, root, source);
+    while let Some(m) = matches.next() {
         let mut name_node: Option<Node> = None;
         let mut def_node: Option<Node> = None;
 
         for cap in m.captures {
-            let cap_name = query.capture_names()[cap.index as usize].as_str();
+            let cap_name = query.capture_names()[cap.index as usize];
             match cap_name {
                 "name" => name_node = Some(cap.node),
                 "def" => def_node = Some(cap.node),
@@ -1608,7 +1611,7 @@ pub fn analyze_file(path: &Path) -> Result<FileSymbols> {
 
     let mut parser = Parser::new();
     parser
-        .set_language(language)
+        .set_language(&language)
         .context("Failed to set tree-sitter language")?;
 
     let tree = parser
@@ -1617,8 +1620,8 @@ pub fn analyze_file(path: &Path) -> Result<FileSymbols> {
 
     let root = tree.root_node();
 
-    let mut symbols = driver.extract_skeleton(&abs, source, root, language)?;
-    let mut imports = driver.find_imports(&abs, source, root, language)?;
+    let mut symbols = driver.extract_skeleton(&abs, source, root, language.clone())?;
+    let mut imports = driver.find_imports(&abs, source, root, language.clone())?;
     let mut exports = driver.find_exports(&abs, source, root, language)?;
 
     // Stable ordering: by line then name.
