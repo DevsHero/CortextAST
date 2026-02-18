@@ -447,6 +447,12 @@ pub fn render_skeleton(path: &Path) -> Result<String> {
 
     let source_text = std::fs::read_to_string(&abs)
         .with_context(|| format!("Failed to read {}", abs.display()))?;
+
+    // Safety net: bail out before Tree-sitter on minified/machine-generated content.
+    if is_minified_or_generated(&source_text) {
+        return Ok("/* MINIFIED_OR_GENERATED — skipped */\n".to_string());
+    }
+
     let source = source_text.as_bytes();
 
     let mut parser = Parser::new();
@@ -471,6 +477,11 @@ pub fn render_skeleton_from_source(path: &Path, source_text: &str) -> Result<Str
         std::env::current_dir().context("Failed to get current dir")?.join(path)
     };
 
+    // Safety net.
+    if is_minified_or_generated(source_text) {
+        return Ok("/* MINIFIED_OR_GENERATED — skipped */\n".to_string());
+    }
+
     let driver = language_config()
         .driver_for_path(&abs)
         .ok_or_else(|| anyhow!("Unsupported file extension: {}", abs.display()))?;
@@ -492,10 +503,28 @@ pub fn render_skeleton_from_source(path: &Path, source_text: &str) -> Result<Str
     Ok(clean_skeleton_text(&abs, &out))
 }
 
+/// Return true when a source text looks minified or machine-generated.
+///
+/// Heuristic: inspect the first 5 non-empty lines.  If *any* single line exceeds 2 000 chars
+/// the file is almost certainly minified JS/CSS/JSON — running Tree-sitter or Regex on it
+/// wastes CPU and may hang a low-RAM machine.
+pub fn is_minified_or_generated(source_text: &str) -> bool {
+    const MAX_SAFE_LINE_CHARS: usize = 2_000;
+    source_text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(5)
+        .any(|l| l.len() > MAX_SAFE_LINE_CHARS)
+}
+
 /// Attempt to skeletonize a file, returning None when the file type isn't supported.
 ///
 /// This is intended for slicer fallbacks: unsupported file types should not default to full content.
 pub fn try_render_skeleton_from_source(path: &Path, source_text: &str) -> Result<Option<String>> {
+    // Safety net: skip minified / machine-generated files before any parsing.
+    if is_minified_or_generated(source_text) {
+        return Ok(Some("/* MINIFIED_OR_GENERATED — skipped */\n".to_string()));
+    }
     let abs: PathBuf = if path.is_absolute() {
         path.to_path_buf()
     } else {

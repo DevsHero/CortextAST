@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use ignore::overrides::{Override, OverrideBuilder};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+use crate::config::ABSOLUTE_MAX_FILE_BYTES;
 
 fn repomix_default_overrides(repo_root: &Path, exclude_dir_names: &[String]) -> Result<Override> {
     let mut ob = OverrideBuilder::new(repo_root);
@@ -10,36 +13,41 @@ fn repomix_default_overrides(repo_root: &Path, exclude_dir_names: &[String]) -> 
     // Note: For directories, include patterns for both the directory entry and its descendants,
     // otherwise walkers may still descend into the directory.
 
+    // NOTE: Override globs behave like ripgrep's `--glob` rules:
+    // - If you add any *include* glob (no leading '!'), the walker becomes whitelisted.
+    // - Globs with a leading '!' are *excludes*.
+    // We want a normal walk (include everything) with a strong default exclude list.
+
     // Lockfiles
-    ob.add("**/*.lock")?;
-    ob.add("**/package-lock.json")?;
-    ob.add("**/pnpm-lock.yaml")?;
-    ob.add("**/yarn.lock")?;
-    ob.add("**/Cargo.lock")?;
+    ob.add("!**/*.lock")?;
+    ob.add("!**/package-lock.json")?;
+    ob.add("!**/pnpm-lock.yaml")?;
+    ob.add("!**/yarn.lock")?;
+    ob.add("!**/Cargo.lock")?;
 
     // Sourcemaps + images/icons
-    ob.add("**/*.map")?;
-    ob.add("**/*.svg")?;
-    ob.add("**/*.png")?;
-    ob.add("**/*.ico")?;
-    ob.add("**/*.jpg")?;
-    ob.add("**/*.jpeg")?;
-    ob.add("**/*.gif")?;
+    ob.add("!**/*.map")?;
+    ob.add("!**/*.svg")?;
+    ob.add("!**/*.png")?;
+    ob.add("!**/*.ico")?;
+    ob.add("!**/*.jpg")?;
+    ob.add("!**/*.jpeg")?;
+    ob.add("!**/*.gif")?;
 
     // Common junk file types (binaries, generated, etc.)
-    ob.add("**/*.pyc")?;
-    ob.add("**/*.pyo")?;
-    ob.add("**/*.pyd")?;
-    ob.add("**/*.class")?;
-    ob.add("**/*.o")?;
-    ob.add("**/*.a")?;
-    ob.add("**/*.so")?;
-    ob.add("**/*.dylib")?;
-    ob.add("**/*.dll")?;
-    ob.add("**/*.exe")?;
-    ob.add("**/*.wasm")?;
-    ob.add("**/*.min.js")?;
-    ob.add("**/*.min.css")?;
+    ob.add("!**/*.pyc")?;
+    ob.add("!**/*.pyo")?;
+    ob.add("!**/*.pyd")?;
+    ob.add("!**/*.class")?;
+    ob.add("!**/*.o")?;
+    ob.add("!**/*.a")?;
+    ob.add("!**/*.so")?;
+    ob.add("!**/*.dylib")?;
+    ob.add("!**/*.dll")?;
+    ob.add("!**/*.exe")?;
+    ob.add("!**/*.wasm")?;
+    ob.add("!**/*.min.js")?;
+    ob.add("!**/*.min.css")?;
 
     // Common build outputs / heavy dirs (multi-language)
     for d in [
@@ -95,8 +103,8 @@ fn repomix_default_overrides(repo_root: &Path, exclude_dir_names: &[String]) -> 
         "logs",
         ".cache",
     ] {
-        ob.add(&format!("**/{d}"))?;
-        ob.add(&format!("**/{d}/**"))?;
+        ob.add(&format!("!**/{d}"))?;
+        ob.add(&format!("!**/{d}/**"))?;
     }
 
     // Project-specific excluded dirs
@@ -105,8 +113,8 @@ fn repomix_default_overrides(repo_root: &Path, exclude_dir_names: &[String]) -> 
         if d.is_empty() {
             continue;
         }
-        ob.add(&format!("**/{d}"))?;
-        ob.add(&format!("**/{d}/**"))?;
+        ob.add(&format!("!**/{d}"))?;
+        ob.add(&format!("!**/{d}/**"))?;
     }
 
     Ok(ob.build()?)
@@ -150,9 +158,36 @@ pub fn scan_workspace(opts: &ScanOptions) -> Result<Vec<FileEntry>> {
 
     let mut entries = Vec::new();
     let overrides = repomix_default_overrides(&opts.repo_root, &opts.exclude_dir_names)?;
+
+    // Hard exclude by directory component name. This is intentionally redundant with overrides,
+    // because overrides alone are easy to misconfigure and we must never descend into heavy dirs
+    // like `.git/` or `target/`.
+    let mut excluded_dir_names: HashSet<String> = HashSet::new();
+    for d in &opts.exclude_dir_names {
+        let d = d.trim().trim_matches('/');
+        if !d.is_empty() {
+            excluded_dir_names.insert(d.to_string());
+        }
+    }
+
     let walker = WalkBuilder::new(&target_root)
         .standard_filters(true) // .gitignore, .ignore, hidden, etc.
         .overrides(overrides)
+        .filter_entry(move |dent| {
+            // Skip excluded directories by name (prevents descending).
+            if dent
+                .file_type()
+                .map(|ft| ft.is_dir())
+                .unwrap_or(false)
+            {
+                if let Some(name) = dent.path().file_name().and_then(|s| s.to_str()) {
+                    if excluded_dir_names.contains(name) {
+                        return false;
+                    }
+                }
+            }
+            true
+        })
         .build();
 
     for item in walker {
@@ -173,6 +208,13 @@ pub fn scan_workspace(opts: &ScanOptions) -> Result<Vec<FileEntry>> {
             Err(_) => continue,
         };
 
+        // Hard absolute cap — always skip before any config override can raise it.
+        if bytes > ABSOLUTE_MAX_FILE_BYTES {
+            eprintln!("[neurosiphon] skipping large file ({}): {}",
+                humanize_bytes(bytes), abs_path.display());
+            continue;
+        }
+
         if bytes == 0 || bytes > opts.max_file_bytes {
             continue;
         }
@@ -191,19 +233,35 @@ pub fn scan_workspace(opts: &ScanOptions) -> Result<Vec<FileEntry>> {
     Ok(entries)
 }
 
+fn humanize_bytes(bytes: u64) -> String {
+    if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 fn scan_single_file(repo_root: &Path, abs_path: &Path, max_file_bytes: u64) -> Result<Vec<FileEntry>> {
     // Apply the same default overrides for consistency.
     let ov = repomix_default_overrides(repo_root, &[])?;
-    if ov.matched(abs_path, /* is_dir */ false).is_ignore() {
+
+    let rel_path = path_relative_to(abs_path, repo_root)?;
+    if ov.matched(&rel_path, /* is_dir */ false).is_ignore() {
         return Ok(vec![]);
     }
 
     let bytes = std::fs::metadata(abs_path)?.len();
+    if bytes > ABSOLUTE_MAX_FILE_BYTES {
+        eprintln!("[neurosiphon] skipping large file ({}): {}",
+            humanize_bytes(bytes), abs_path.display());
+        return Ok(vec![]);
+    }
     if bytes == 0 || bytes > max_file_bytes {
         return Ok(vec![]);
     }
 
-    let rel_path = path_relative_to(abs_path, repo_root)?;
     Ok(vec![FileEntry {
         abs_path: abs_path.to_path_buf(),
         rel_path,

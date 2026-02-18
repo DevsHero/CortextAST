@@ -8,11 +8,16 @@ pub struct TokenEstimatorConfig {
     pub max_file_bytes: u64,
 }
 
+/// Hard safety ceiling: files larger than this are **always** skipped, regardless of config.
+/// This protects low-RAM machines from trying to Tree-sitter-parse a 10 MB minified bundle.
+pub const ABSOLUTE_MAX_FILE_BYTES: u64 = 1_000_000; // 1 MB
+
 impl Default for TokenEstimatorConfig {
     fn default() -> Self {
         Self {
             chars_per_token: 4,
-            max_file_bytes: 1024 * 1024,
+            // 512 KB default — enough for any real source file, blocks log/generated bloat.
+            max_file_bytes: 512 * 1024,
         }
     }
 }

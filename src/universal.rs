@@ -58,6 +58,16 @@ fn is_definition_line(line: &str) -> bool {
 ///
 /// Output is line-based: definition-ish lines are kept, gaps are collapsed to a single `...` line.
 pub fn render_universal_skeleton(source_text: &str) -> String {
+    // Guard: if any of the first 5 non-empty lines exceeds 2 000 chars the file is minified.
+    // Bail early to avoid burning CPU on huge one-liners.
+    let minified = source_text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(5)
+        .any(|l| l.len() > 2_000);
+    if minified {
+        return "/* MINIFIED_OR_GENERATED — skipped */\n".to_string();
+    }
     let max_kept_lines: usize = 600;
 
     let mut out = String::new();
