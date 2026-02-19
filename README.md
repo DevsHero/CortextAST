@@ -53,7 +53,7 @@ It parses your code (AST), understands structure, nukes the fat, and feeds the L
 
 2. **JIT Vector Indexing (Always Fresh)**
   - No background watcher: **0 CPU until you query**
-  - Before every search, NeuroSiphon refreshes the index using a fast mtime sweep + incremental embed updates
+  - Before every search, NeuroSiphon refreshes the index using a fast size sweep + **xxh3 content hashing** + incremental embed updates
   - Result: you can edit/generate files and query immediately without stale results
 
 3. **Lightweight Hybrid Search**
@@ -64,6 +64,23 @@ It parses your code (AST), understands structure, nukes the fat, and feeds the L
 4. **Native MCP Server**
    - Built for **Claude Desktop** / **Cursor** / any MCP client
    - No plugins, no API keys, no cloud required
+
+---
+
+## 🧬 New MCP Tools (v1.2.0)
+
+NeuroSiphon exposes two AST-powered tools designed to *avoid heavy full-file reads* and *avoid noisy grep*.
+
+- **`neurosiphon_read_symbol`** (The X-Ray)
+  - Args: `path`, `symbol_name`
+  - Returns the **full, unpruned** source of that symbol by extracting the exact Tree-sitter byte range.
+  - Best for: “Show me the full implementation of `ConvertRequest`.”
+
+- **`neurosiphon_find_usages`** (The AST-Tracer)
+  - Args: `target_dir`, `symbol_name`
+  - Walks files with `ignore` + parses with Tree-sitter.
+  - Matches only semantic identifier nodes (not comments/strings) and returns a dense list of:
+    - `[File Path: Line Number]` + 2 lines above/below as context
 
 ---
 
@@ -151,6 +168,24 @@ NeuroSiphon will:
 2. Graph-rank the results (core logic > tests)
 3. Skeletonize and nuke imports to fit your token budget
 4. Return an optimized context slice
+
+### Deep-Dive (New AST Tools)
+
+If the LLM needs *one exact implementation* or *exact cross-file references*:
+
+- Ask for a symbol implementation via `neurosiphon_read_symbol`
+- Trace semantic usages across the repo via `neurosiphon_find_usages`
+
+These work even when the repo doesn’t compile and the LSP is broken.
+
+---
+
+## 🗒️ Changelog (v1.2.0)
+
+- **Vector index v2**: deterministic cache invalidation via **xxh3 content hashing** (no more mtime/git-checkout drift)
+- **AST-aware semantic chunking**: large files embed as multiple chunks (less vector dilution)
+- **Symbol anchoring**: boosts results when query contains an exact symbol name
+- **New MCP tools**: `neurosiphon_read_symbol` and `neurosiphon_find_usages`
 
 ### Manual (CLI)
 

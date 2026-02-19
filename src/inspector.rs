@@ -1637,3 +1637,430 @@ pub fn analyze_file(path: &Path) -> Result<FileSymbols> {
         symbols,
     })
 }
+
+/// Extract all top-level symbols from source text without a disk read.
+///
+/// Used by the vector store for:
+///  1. AST-aware chunk boundary detection (group `chunk_lines` of symbols per chunk).
+///  2. Symbol anchoring: store symbol names in the index so search can boost exact matches.
+///
+/// Returns an empty vec for unsupported file types (graceful fallback to line-chunking).
+pub fn extract_symbols_from_source(path: &Path, source_text: &str) -> Vec<Symbol> {
+    if is_minified_or_generated(source_text) {
+        return vec![];
+    }
+
+    let abs: PathBuf = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => return vec![],
+        }
+    };
+
+    let Some(driver) = language_config().driver_for_path(&abs) else {
+        return vec![];
+    };
+
+    let language = driver.language_for_path(&abs);
+    let source = source_text.as_bytes();
+
+    let mut parser = Parser::new();
+    if parser.set_language(&language).is_err() {
+        return vec![];
+    }
+
+    let Some(tree) = parser.parse(source_text, None) else {
+        return vec![];
+    };
+
+    let root = tree.root_node();
+
+    match driver.extract_skeleton(&abs, source, root, language) {
+        Ok(mut syms) => {
+            syms.sort_by(|a, b| a.line.cmp(&b.line));
+            syms
+        }
+        Err(_) => vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tool: neurosiphon_read_symbol — The X-Ray
+// ---------------------------------------------------------------------------
+
+/// Extract the full, unpruned source of a specific named symbol from `path`.
+///
+/// Uses tree-sitter to locate the exact declaration node — bodies are never pruned.
+/// For Rust files `impl Foo` blocks are also searchable even though they are omitted
+/// from the standard skeleton.
+///
+/// Returns a header line followed by the raw source text:
+/// ```text
+/// // fn `process` — src/handler.rs:L42-L78
+/// pub fn process(...) {
+///     ...
+/// }
+/// ```
+pub fn read_symbol(path: &Path, symbol_name: &str) -> Result<String> {
+    let abs: PathBuf = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().context("Failed to get cwd")?.join(path)
+    };
+
+    let raw = std::fs::read(&abs)
+        .with_context(|| format!("Failed to read {}", abs.display()))?;
+    if raw.contains(&0u8) {
+        return Err(anyhow!("Binary file — cannot extract symbol"));
+    }
+    let source_text = String::from_utf8_lossy(&raw).into_owned();
+
+    let Some(driver) = language_config().driver_for_path(&abs) else {
+        return Err(anyhow!(
+            "Unsupported file type: {}",
+            abs.extension().and_then(|e| e.to_str()).unwrap_or("?")
+        ));
+    };
+    let language = driver.language_for_path(&abs);
+    let source = source_text.as_bytes();
+
+    let mut parser = Parser::new();
+    parser.set_language(&language).context("Failed to set tree-sitter language")?;
+    let tree = parser
+        .parse(&source_text, None)
+        .ok_or_else(|| anyhow!("Tree-sitter parse failed for {}", abs.display()))?;
+    let root = tree.root_node();
+
+    // ── Step 1: gather all named declarations with byte offsets ──────────
+    let offsets = line_byte_offsets(&source_text);
+    let mut candidates: Vec<(String, String, usize, usize)> = Vec::new(); // (name, kind, start, end)
+
+    // Standard symbols from the driver (fn, struct, enum, trait, class, method…)
+    if let Ok(syms) = driver.extract_skeleton(&abs, source, root, language.clone()) {
+        for sym in &syms {
+            let start = offsets.get(sym.line as usize).copied().unwrap_or(0);
+            let end = if (sym.line_end as usize + 1) < offsets.len() {
+                offsets[sym.line_end as usize + 1]
+            } else {
+                source_text.len()
+            };
+            candidates.push((sym.name.clone(), sym.kind.clone(), start, end));
+        }
+    }
+
+    // For Rust: also include `impl` blocks (not returned by extract_skeleton).
+    if driver.name() == "rust" {
+        let impl_blocks = rust_impl_byte_ranges(source, root, &language);
+        candidates.extend(impl_blocks);
+    }
+
+    // ── Step 2: find best match (exact → case-insensitive) ───────────────
+    let found = candidates
+        .iter()
+        .find(|(name, _, _, _)| name == symbol_name)
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|(name, _, _, _)| name.eq_ignore_ascii_case(symbol_name))
+        });
+
+    let Some((name, kind, start_byte, end_byte)) = found else {
+        let mut available: Vec<String> = candidates
+            .iter()
+            .map(|(n, k, _, _)| format!("  {k} {n}"))
+            .collect();
+        available.sort();
+        return Err(anyhow!(
+            "Symbol `{}` not found in {}.\nAvailable symbols:\n{}",
+            symbol_name,
+            abs.display(),
+            available.join("\n")
+        ));
+    };
+
+    // ── Step 3: format and return ─────────────────────────────────────────
+    let body = &source_text[*start_byte..*end_byte];
+    let start_line = source_text[..*start_byte].bytes().filter(|&b| b == b'\n').count() + 1;
+    let end_line = source_text[..*end_byte].bytes().filter(|&b| b == b'\n').count() + 1;
+
+    Ok(format!(
+        "// {kind} `{name}` — {}:L{start_line}-L{end_line}\n{body}",
+        abs.display()
+    ))
+}
+
+/// Compute byte offset of the start of each line (0-indexed).
+fn line_byte_offsets(text: &str) -> Vec<usize> {
+    let mut offsets = vec![0usize];
+    for (i, b) in text.bytes().enumerate() {
+        if b == b'\n' {
+            offsets.push(i + 1);
+        }
+    }
+    offsets
+}
+
+/// Run a tree-sitter query with `@name` / `@def` captures and return
+/// `(name_text, start_byte, end_byte)` tuples.
+fn find_named_decls_raw(
+    source: &[u8],
+    root: Node,
+    language: &Language,
+    query_src: &str,
+) -> Vec<(String, usize, usize)> {
+    let Ok(query) = Query::new(language, query_src) else {
+        return vec![];
+    };
+    let mut cursor = QueryCursor::new();
+    let mut out: Vec<(String, usize, usize)> = Vec::new();
+
+    let mut matches = cursor.matches(&query, root, source);
+    while let Some(m) = matches.next() {
+        let mut name_text = String::new();
+        let mut def_start = 0usize;
+        let mut def_end = 0usize;
+        let mut has_def = false;
+
+        for cap in m.captures {
+            let cap_name = query.capture_names()[cap.index as usize];
+            match cap_name {
+                "name" => {
+                    name_text = std::str::from_utf8(
+                        &source[cap.node.start_byte()..cap.node.end_byte()],
+                    )
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                }
+                "def" => {
+                    def_start = cap.node.start_byte();
+                    def_end = cap.node.end_byte();
+                    has_def = true;
+                }
+                _ => {}
+            }
+        }
+
+        if !name_text.is_empty() && has_def {
+            out.push((name_text, def_start, def_end));
+        }
+    }
+    out
+}
+
+/// Find Rust `impl` blocks by byte range.
+/// Returns `(name, "impl", start_byte, end_byte)` tuples.
+fn rust_impl_byte_ranges(
+    source: &[u8],
+    root: Node,
+    language: &Language,
+) -> Vec<(String, String, usize, usize)> {
+    let mut out: Vec<(String, String, usize, usize)> = Vec::new();
+
+    // impl Foo { ... }
+    for (name, start, end) in find_named_decls_raw(
+        source,
+        root,
+        language,
+        r#"(impl_item type: (type_identifier) @name) @def"#,
+    ) {
+        out.push((name, "impl".to_string(), start, end));
+    }
+
+    // impl<T> Foo<T> { ... }
+    for (name, start, end) in find_named_decls_raw(
+        source,
+        root,
+        language,
+        r#"(impl_item type: (generic_type type: (type_identifier) @name)) @def"#,
+    ) {
+        out.push((name, "impl".to_string(), start, end));
+    }
+
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Tool: neurosiphon_find_usages — The AST-Tracer
+// ---------------------------------------------------------------------------
+
+/// Find all semantic usages of `symbol_name` across code files under `target_dir`.
+///
+/// Algorithm:
+///  1. Walk `target_dir` with `ignore::WalkBuilder` (honours `.gitignore`).
+///  2. For each supported-language file containing `symbol_name` as a substring
+///     (fast pre-filter), parse with tree-sitter.
+///  3. Recursively visit AST leaf nodes: collect `identifier`, `type_identifier`,
+///     `field_identifier`, `property_identifier` nodes whose text == `symbol_name`.
+///  4. Prune entire comment / string subtrees — zero false positives from docs or
+///     string constants.
+///  5. Return a dense listing with 2-line context windows.
+///
+/// Works even when the project currently **fails to compile** because it uses the
+/// raw AST, not an LSP or compiler.
+pub fn find_usages(target_dir: &Path, symbol_name: &str) -> Result<String> {
+    use ignore::WalkBuilder;
+
+    let abs_dir: PathBuf = if target_dir.is_absolute() {
+        target_dir.to_path_buf()
+    } else {
+        std::env::current_dir().context("Failed to get cwd")?.join(target_dir)
+    };
+
+    let walker = WalkBuilder::new(&abs_dir)
+        .standard_filters(true) // respects .gitignore, .git/info/exclude, default ignores
+        .hidden(true)            // skip dot-dirs like .git, node_modules handled by standard_filters
+        .build();
+
+    let cfg = language_config();
+    let mut all_results: Vec<UsageMatch> = Vec::new();
+
+    for entry_result in walker {
+        let Ok(entry) = entry_result else { continue };
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        // Only process files with a supported language driver.
+        if cfg.driver_for_path(path).is_none() {
+            continue;
+        }
+
+        let Ok(raw) = std::fs::read(path) else { continue };
+        if raw.contains(&0u8) {
+            continue; // binary
+        }
+        let Ok(source_text) = std::str::from_utf8(&raw) else { continue };
+
+        // Hot path: fast substring pre-filter before paying the tree-sitter parse cost.
+        if !source_text.contains(symbol_name) {
+            continue;
+        }
+
+        let Some(driver) = cfg.driver_for_path(path) else { continue };
+        let language = driver.language_for_path(path);
+        let source = source_text.as_bytes();
+
+        let mut parser = Parser::new();
+        if parser.set_language(&language).is_err() {
+            continue;
+        }
+        let Some(tree) = parser.parse(source_text, None) else { continue };
+        let root = tree.root_node();
+
+        // AST-level reference collection — excludes comments and string literals.
+        let mut hit_rows: Vec<u32> = Vec::new();
+        collect_identifier_refs(root, source, symbol_name, &mut hit_rows);
+
+        if hit_rows.is_empty() {
+            continue;
+        }
+
+        hit_rows.sort();
+        hit_rows.dedup();
+
+        let text_lines: Vec<&str> = source_text.lines().collect();
+        let display_path = path.to_string_lossy();
+
+        for row_0 in hit_rows {
+            all_results.push(UsageMatch {
+                file: display_path.to_string(),
+                line_1: row_0 + 1,
+                context: extract_context_lines(&text_lines, row_0 as usize, 2),
+            });
+        }
+    }
+
+    if all_results.is_empty() {
+        return Ok(format!(
+            "No usages of `{}` found in {}.",
+            symbol_name,
+            abs_dir.display()
+        ));
+    }
+
+    let mut out = format!("{} usage(s) of `{symbol_name}` found:\n\n", all_results.len());
+    for m in &all_results {
+        out.push_str(&format!("[{}:{}]\n", m.file, m.line_1));
+        out.push_str(&format!("Context:\n{}\n\n", m.context));
+    }
+    Ok(out)
+}
+
+struct UsageMatch {
+    file: String,
+    line_1: u32,
+    context: String,
+}
+
+/// Recursively collect AST leaf identifier nodes that match `symbol_name`,
+/// skipping comment and string-literal subtrees entirely.
+fn collect_identifier_refs(node: Node, source: &[u8], symbol_name: &str, out: &mut Vec<u32>) {
+    let kind = node.kind();
+
+    // Prune entire comment / string subtrees — no matches inside these nodes.
+    if kind.contains("comment")
+        || matches!(
+            kind,
+            "string"
+                | "string_literal"
+                | "raw_string"
+                | "raw_string_literal"
+                | "interpreted_string_literal"
+                | "char_literal"
+                | "template_string"
+                | "string_fragment"
+                | "heredoc_body"
+                | "regex_pattern"
+        )
+    {
+        return;
+    }
+
+    // For leaf nodes: check if this is a semantic identifier matching the target.
+    if node.child_count() == 0 {
+        if matches!(
+            kind,
+            "identifier"
+                | "type_identifier"
+                | "field_identifier"
+                | "property_identifier"
+                | "shorthand_property_identifier"
+                | "shorthand_property_identifier_pattern"
+        ) {
+            let slice = &source[node.start_byte()..node.end_byte()];
+            if let Ok(text) = std::str::from_utf8(slice) {
+                if text == symbol_name {
+                    out.push(node.start_position().row as u32);
+                }
+            }
+        }
+        return;
+    }
+
+    // Recurse into children.
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_identifier_refs(child, source, symbol_name, out);
+    }
+}
+
+/// Build a 2×`ctx`-line context block around `target_0` (0-indexed), marking the
+/// hit line with `>>>`.
+fn extract_context_lines(lines: &[&str], target_0: usize, ctx: usize) -> String {
+    let start = target_0.saturating_sub(ctx);
+    let end = (target_0 + ctx + 1).min(lines.len());
+    lines[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let ln = start + i + 1;
+            let marker = if start + i == target_0 { ">>>" } else { "   " };
+            format!("  {marker} {:>4} | {}", ln, l)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}

@@ -4,7 +4,7 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use crate::config::load_config;
-use crate::inspector::render_skeleton;
+use crate::inspector::{render_skeleton, read_symbol, find_usages};
 use crate::mapper::{build_repo_map, build_repo_map_scoped};
 use crate::slicer::{slice_paths_to_xml, slice_to_xml};
 use crate::scanner::{scan_workspace, ScanOptions};
@@ -84,6 +84,32 @@ impl ServerState {
                                 "path": { "type": "string", "description": "Path to the file (relative to repoPath, or absolute)" }
                             },
                             "required": ["path"]
+                        }
+                    },
+                    {
+                        "name": "neurosiphon_read_symbol",
+                        "description": "Extract the full, unpruned source code of a specific symbol (function, struct, impl block, class, etc.) from a file. Uses Tree-sitter to locate the exact declaration node — no skeleton pruning. Returns the complete implementation with a header showing the file:line range. Much cheaper than reading the entire file when you only need one symbol.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "repoPath": { "type": "string", "description": "Absolute path to the repo root (used to resolve relative paths)" },
+                                "path": { "type": "string", "description": "Path to the source file (relative to repoPath, or absolute)" },
+                                "symbol_name": { "type": "string", "description": "Exact name of the symbol to extract (e.g. 'process_request', 'ConvertRequest', 'MyStruct')" }
+                            },
+                            "required": ["path", "symbol_name"]
+                        }
+                    },
+                    {
+                        "name": "neurosiphon_find_usages",
+                        "description": "Find all semantic usages of a symbol across the workspace using Tree-sitter AST analysis. Excludes false positives from comments and string literals. Returns a dense listing of every call site, type reference, and identifier usage with 2-line context. Works even when the project fails to compile.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "repoPath": { "type": "string", "description": "Absolute path to the repo root" },
+                                "target_dir": { "type": "string", "description": "Directory to search in (relative to repoPath, or absolute). Use '.' for the whole repo." },
+                                "symbol_name": { "type": "string", "description": "Symbol name to find usages of (e.g. 'process_request', 'ConvertRequest')" }
+                            },
+                            "required": ["target_dir", "symbol_name"]
                         }
                     }
                 ]
@@ -180,6 +206,34 @@ impl ServerState {
                 match std::fs::read_to_string(&abs).with_context(|| format!("Failed to read {}", abs.display())) {
                     Ok(s) => ok(s),
                     Err(e) => err(format!("read failed: {e}")),
+                }
+            }
+            "neurosiphon_read_symbol" => {
+                let repo_root = self.repo_root_from_params(&args);
+                let Some(p) = args.get("path").and_then(|v| v.as_str()) else {
+                    return err("Missing path".to_string());
+                };
+                let Some(sym) = args.get("symbol_name").and_then(|v| v.as_str()) else {
+                    return err("Missing symbol_name".to_string());
+                };
+                let abs = resolve_path(&repo_root, p);
+                match read_symbol(&abs, sym) {
+                    Ok(s) => ok(s),
+                    Err(e) => err(format!("read_symbol failed: {e}")),
+                }
+            }
+            "neurosiphon_find_usages" => {
+                let repo_root = self.repo_root_from_params(&args);
+                let Some(target_str) = args.get("target_dir").and_then(|v| v.as_str()) else {
+                    return err("Missing target_dir".to_string());
+                };
+                let Some(sym) = args.get("symbol_name").and_then(|v| v.as_str()) else {
+                    return err("Missing symbol_name".to_string());
+                };
+                let target_dir = resolve_path(&repo_root, target_str);
+                match find_usages(&target_dir, sym) {
+                    Ok(s) => ok(s),
+                    Err(e) => err(format!("find_usages failed: {e}")),
                 }
             }
             _ => err(format!("Tool not found: {name}")),

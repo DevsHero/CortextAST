@@ -1,6 +1,6 @@
 [package]
 name = "neurosiphon"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 description = "God-tier context optimizer for LLMs using AST skeletonization and JIT hybrid search."
 authors = ["Thanon Aphithanawat <thanon@aphithanawat.me>"]
@@ -27,6 +27,10 @@ indicatif = "0.17"
 # model2vec-rs: static embeddings via HuggingFace Hub; no ONNX runtime required.
 # Vector index: serde_json flat-file index with O(n*d) cosine search (n<=400 files, d=256 dims).
 model2vec-rs = "0.1.4"
+
+# Deterministic content hashing for cache invalidation (replaces mtime).
+# xxh3 is a non-cryptographic but collision-resistant hash; ~10 GB/s on M4.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Deep-dive inspection (symbol extraction)
 tree-sitter = "0.26.5"
