@@ -810,7 +810,9 @@ impl LanguageDriver for TypeScriptDriver {
     }
 
     fn extensions(&self) -> &'static [&'static str] {
-        &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]
+        // Enterprise guarantee: TSX/JSX must be explicitly supported.
+        // Note: `handles_path` still accepts additional JS/TS extensions.
+        &["ts", "tsx", "js", "jsx"]
     }
 
     fn handles_path(&self, path: &Path) -> bool {
@@ -2323,19 +2325,30 @@ fn extract_context_lines(lines: &[&str], target_0: usize, ctx: usize) -> String 
 ///       [struct  ] User
 /// ```
 pub fn repo_map(target_dir: &Path) -> Result<String> {
-    repo_map_with_filter(target_dir, None, None)
+    repo_map_with_filter(target_dir, None, None, false)
 }
 
 pub fn repo_map_with_filter(
     target_dir: &Path,
     search_filter: Option<&str>,
     max_chars: Option<usize>,
+    ignore_gitignore: bool,
 ) -> Result<String> {
     use ignore::WalkBuilder;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
+    // Absolute hard cap to prevent MCP clients from offloading huge payloads
+    // into resource files (which breaks agent loops).
+    const HARD_MAX_CHARS_TOTAL: usize = 9_000;
     const MAX_SYMS_PER_FILE: usize = 20;
-    let max_chars_total = max_chars.unwrap_or(32_000);
+
+    // Progressive disclosure thresholds.
+    const DEEP_MAX_FILES: usize = 30;
+    const FILES_ONLY_MAX_FILES: usize = 150;
+
+    let max_chars_total = max_chars
+        .map(|n| n.min(HARD_MAX_CHARS_TOTAL))
+        .unwrap_or(HARD_MAX_CHARS_TOTAL);
 
     let abs_dir: PathBuf = if target_dir.is_absolute() {
         target_dir.to_path_buf()
@@ -2346,15 +2359,18 @@ pub fn repo_map_with_filter(
     };
 
     let walker = WalkBuilder::new(&abs_dir)
-        .standard_filters(true)
+        .standard_filters(!ignore_gitignore)
         .hidden(true)
         .build();
 
     let cfg = language_config();
     let filter_lc = search_filter.map(|s| s.to_ascii_lowercase());
 
-    // dir_rel → Vec<(filename, Vec<(kind, name)>)>
-    let mut by_dir: BTreeMap<String, Vec<(String, Vec<(String, String)>)>> = BTreeMap::new();
+    // Pass 1: collect supported files + dirs without reading file contents.
+    // We only read files for symbols in Deep mode (<= 30 files).
+    let mut by_dir_files: BTreeMap<String, Vec<(String, PathBuf)>> = BTreeMap::new();
+    let mut unique_dirs: BTreeSet<String> = BTreeSet::new();
+    let mut total_files: usize = 0;
 
     for entry_result in walker {
         let Ok(entry) = entry_result else { continue };
@@ -2382,31 +2398,21 @@ pub fn repo_map_with_filter(
             .to_string_lossy()
             .to_string();
 
-        // Read source once; use extract_symbols_from_source (never fails on bad
-        // queries) then filter to "public" symbols with a language-aware heuristic.
-        let Ok(source_text) = std::fs::read_to_string(path) else { continue };
-        let syms = extract_symbols_from_source(path, &source_text);
-        let source_lines: Vec<&str> = source_text.lines().collect();
-
-        let sym_pairs: Vec<(String, String)> = syms
-            .into_iter()
-            .filter(|s| is_public_symbol(s, &source_lines, path))
-            .take(MAX_SYMS_PER_FILE)
-            .map(|s| (s.kind.clone(), s.name.clone()))
-            .collect();
-
-        // Optional narrowing: keep only matching files/symbols.
+        // Optional narrowing: path/filename filter (fast + deterministic).
         if let Some(f) = &filter_lc {
-            let rel_match = rel_path.to_ascii_lowercase().contains(f);
-            let sym_match = sym_pairs
-                .iter()
-                .any(|(_k, n)| n.to_ascii_lowercase().contains(f));
-            if !(rel_match || sym_match) {
+            if !rel_path.to_ascii_lowercase().contains(f) && !filename.to_ascii_lowercase().contains(f) {
                 continue;
             }
         }
 
-        by_dir.entry(dir_rel).or_default().push((filename, sym_pairs));
+        total_files += 1;
+        if !dir_rel.is_empty() {
+            unique_dirs.insert(dir_rel.clone());
+        }
+        by_dir_files
+            .entry(dir_rel)
+            .or_default()
+            .push((filename, path.to_path_buf()));
     }
 
     let mut out = String::new();
@@ -2414,57 +2420,137 @@ pub fn repo_map_with_filter(
         .file_name()
         .unwrap_or_else(|| abs_dir.as_os_str())
         .to_string_lossy();
-    let total_files: usize = by_dir.values().map(|v| v.len()).sum();
 
-    // ── 0-file guard ────────────────────────────────────────────────────
+    // ── 0-file guard (enterprise diagnostics) ───────────────────────────
     if total_files == 0 {
         return Err(anyhow!(
-            "Error: Target directory '{}' was found but contains no supported \
-            source files (after applying .gitignore and language filters).\n\
-            • Check the path is correct.\n\
-            • If the repo uses a language not yet supported, open an issue.\n\
-            • If a search_filter was set, it may have excluded everything — try without it.",
-            abs_dir.display()
+            "Error: 0 supported source files found in '{}'.\n\
+Diagnostics:\n\
+• Ensure the path is correct relative to the repo root.\n\
+• If files exist but are ignored, try again with `ignore_gitignore`: true.\n\
+• If the repo uses languages/extensions not yet supported, they will be skipped.\n\
+• If `search_filter` was set, it may have excluded everything — try without it.",
+            target_dir.display()
         ));
     }
 
-    // ── Auto-summarize: paths-only mode for large repos ──────────────────
-    const LARGE_REPO_THRESHOLD: usize = 100;
-    let paths_only = total_files > LARGE_REPO_THRESHOLD;
-
-    out.push_str(&format!("{root_name}/   ({total_files} files)\n"));
-    if paths_only {
-        out.push_str(
-            "\n// ⚠️  Large directory detected: 100+ files.  \
-            Symbols are hidden to save tokens.\n\
-            // To see symbols, re-run map_repo on a specific sub-folder \
-            (e.g. target_dir: \"src/payments\").\n"
-        );
+    enum Disclosure {
+        Deep,
+        FilesOnly,
+        FoldersOnly,
     }
 
-    for (dir_rel, mut files) in by_dir {
-        files.sort_by(|a, b| a.0.cmp(&b.0));
+    let disclosure = if total_files <= DEEP_MAX_FILES {
+        Disclosure::Deep
+    } else if total_files <= FILES_ONLY_MAX_FILES {
+        Disclosure::FilesOnly
+    } else {
+        Disclosure::FoldersOnly
+    };
 
-        if !dir_rel.is_empty() {
-            out.push_str(&format!("\n{dir_rel}/\n"));
+    // Push text while enforcing a hard maximum length.
+    let mut push = |s: &str| -> bool {
+        if out.len() >= max_chars_total {
+            return false;
         }
-
-        for (filename, syms) in &files {
-            out.push_str(&format!("  {filename}\n"));
-            if !paths_only {
-                for (kind, name) in syms {
-                    out.push_str(&format!("    [{:<8}] {name}\n", kind));
+        let remaining = max_chars_total - out.len();
+        if s.len() <= remaining {
+            out.push_str(s);
+            true
+        } else {
+            // Truncate and append a marker (without exceeding the limit).
+            let marker = "\n... (output truncated — hard limit reached)\n";
+            let keep = remaining.saturating_sub(marker.len());
+            if keep > 0 {
+                // `keep` is a byte budget; clamp to a UTF-8 char boundary.
+                let mut cut = keep.min(s.len());
+                while cut > 0 && !s.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                if cut > 0 {
+                    out.push_str(&s[..cut]);
                 }
             }
+            out.push_str(marker);
+            false
         }
+    };
 
-        if out.len() > max_chars_total {
-            out.push_str("\n... (output truncated — token limit reached)\n");
-            break;
+    push(&format!("{root_name}/   ({total_files} files)\n"));
+
+    match disclosure {
+        Disclosure::Deep => {}
+        Disclosure::FilesOnly => {
+            push("> ⚠️ Repo Overview: Showing files only (symbols hidden to save context). Target a specific sub-folder to see symbols.\n\n");
+        }
+        Disclosure::FoldersOnly => {
+            push("> ⚠️ Massive Directory: Showing folders only. You MUST run map_repo on a specific sub-folder to see files.\n\n");
         }
     }
 
-    Ok(out)
+    match disclosure {
+        Disclosure::FoldersOnly => {
+            for dir in unique_dirs {
+                if !push(&format!("{dir}/\n")) {
+                    break;
+                }
+            }
+            return Ok(out);
+        }
+        Disclosure::FilesOnly => {
+            for (dir_rel, mut files) in by_dir_files {
+                files.sort_by(|a, b| a.0.cmp(&b.0));
+                if !dir_rel.is_empty() {
+                    if !push(&format!("\n{dir_rel}/\n")) {
+                        break;
+                    }
+                }
+                for (filename, _abs) in files {
+                    if !push(&format!("  {filename}\n")) {
+                        break;
+                    }
+                }
+            }
+            return Ok(out);
+        }
+        Disclosure::Deep => {
+            // Deep mode: read files + extract symbols.
+            for (dir_rel, mut files) in by_dir_files {
+                files.sort_by(|a, b| a.0.cmp(&b.0));
+                if !dir_rel.is_empty() {
+                    if !push(&format!("\n{dir_rel}/\n")) {
+                        break;
+                    }
+                }
+
+                for (filename, abs_file) in files {
+                    if !push(&format!("  {filename}\n")) {
+                        break;
+                    }
+
+                    let Ok(source_text) = std::fs::read_to_string(&abs_file) else { continue };
+                    let syms = extract_symbols_from_source(&abs_file, &source_text);
+                    let source_lines: Vec<&str> = source_text.lines().collect();
+
+                    let mut sym_pairs: Vec<(String, String)> = syms
+                        .into_iter()
+                        .filter(|s| is_public_symbol(s, &source_lines, &abs_file))
+                        .take(MAX_SYMS_PER_FILE)
+                        .map(|s| (s.kind.clone(), s.name.clone()))
+                        .collect();
+                    sym_pairs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+                    for (kind, name) in sym_pairs {
+                        if !push(&format!("    [{:<8}] {name}\n", kind)) {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            Ok(out)
+        }
+    }
 }
 
 /// Determine whether a symbol should be considered "public" for repo_map display.

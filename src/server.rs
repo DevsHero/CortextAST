@@ -44,7 +44,8 @@ impl ServerState {
                                 "repoPath": { "type": "string", "description": "Absolute path to the repo root" },
                                 "target_dir": { "type": "string", "description": "Directory to map (use '.' for whole repo)" },
                                 "search_filter": { "type": "string", "description": "Optional: case-insensitive filter to keep only matching files/symbols (helps avoid pagination)" },
-                                "max_chars": { "type": "integer", "description": "Optional: max output chars (default 32000). Raise for very large repos, lower to save tokens." }
+                                "max_chars": { "type": "integer", "description": "Optional: max output chars (hard cap 9000). Lower to save tokens." },
+                                "ignore_gitignore": { "type": "boolean", "description": "Optional: when true, do not apply .gitignore/.ignore filters (default false). Useful when map_repo returns 0 files." }
                             },
                             "required": ["target_dir"]
                         }
@@ -325,8 +326,9 @@ impl ServerState {
                 };
                 let search_filter = args.get("search_filter").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty());
                 let max_chars = args.get("max_chars").and_then(|v| v.as_u64()).map(|n| n as usize);
+                let ignore_gitignore = args.get("ignore_gitignore").and_then(|v| v.as_bool()).unwrap_or(false);
                 let target_dir = resolve_path(&repo_root, target_str);
-                match repo_map_with_filter(&target_dir, search_filter, max_chars) {
+                match repo_map_with_filter(&target_dir, search_filter, max_chars, ignore_gitignore) {
                     Ok(s) => ok(s),
                     Err(e) => err(format!("repo_map failed: {e}")),
                 }
