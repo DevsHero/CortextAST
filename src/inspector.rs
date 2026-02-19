@@ -1916,14 +1916,33 @@ pub fn read_symbol(path: &Path, symbol_name: &str) -> Result<String> {
     };
 
     // ── Step 3: format and return ─────────────────────────────────────────
+    const MAX_SYMBOL_LINES: usize = 500;
+
     let body = &source_text[*start_byte..*end_byte];
     let start_line = source_text[..*start_byte].bytes().filter(|&b| b == b'\n').count() + 1;
-    let end_line = source_text[..*end_byte].bytes().filter(|&b| b == b'\n').count() + 1;
+    let end_line   = source_text[..*end_byte].bytes().filter(|&b| b == b'\n').count() + 1;
+    let symbol_lines = end_line.saturating_sub(start_line) + 1;
 
-    Ok(format!(
-        "// {kind} `{name}` — {}:L{start_line}-L{end_line}\n{body}",
-        abs.display()
-    ))
+    let header = format!("// {kind} `{name}` — {}:L{start_line}-L{end_line}\n", abs.display());
+
+    if symbol_lines > MAX_SYMBOL_LINES {
+        // Emit only the first MAX_SYMBOL_LINES lines so the MCP payload stays manageable.
+        let truncated: String = body
+            .lines()
+            .take(MAX_SYMBOL_LINES)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cutoff_line = start_line + MAX_SYMBOL_LINES - 1;
+        Ok(format!(
+            "{header}{truncated}\n\n\
+            > ⚠️ **Symbol truncated** — `{name}` is {symbol_lines} lines \
+            (limit: {MAX_SYMBOL_LINES}).  \n\
+            > To read beyond L{cutoff_line}, use `get_context_slice` with a \
+            `byte_range`, or refactor this God object into smaller units.",
+        ))
+    } else {
+        Ok(format!("{header}{body}"))
+    }
 }
 
 /// Compute byte offset of the start of each line (0-indexed).
@@ -2396,7 +2415,32 @@ pub fn repo_map_with_filter(
         .unwrap_or_else(|| abs_dir.as_os_str())
         .to_string_lossy();
     let total_files: usize = by_dir.values().map(|v| v.len()).sum();
+
+    // ── 0-file guard ────────────────────────────────────────────────────
+    if total_files == 0 {
+        return Err(anyhow!(
+            "Error: Target directory '{}' was found but contains no supported \
+            source files (after applying .gitignore and language filters).\n\
+            • Check the path is correct.\n\
+            • If the repo uses a language not yet supported, open an issue.\n\
+            • If a search_filter was set, it may have excluded everything — try without it.",
+            abs_dir.display()
+        ));
+    }
+
+    // ── Auto-summarize: paths-only mode for large repos ──────────────────
+    const LARGE_REPO_THRESHOLD: usize = 100;
+    let paths_only = total_files > LARGE_REPO_THRESHOLD;
+
     out.push_str(&format!("{root_name}/   ({total_files} files)\n"));
+    if paths_only {
+        out.push_str(
+            "\n// ⚠️  Large directory detected: 100+ files.  \
+            Symbols are hidden to save tokens.\n\
+            // To see symbols, re-run map_repo on a specific sub-folder \
+            (e.g. target_dir: \"src/payments\").\n"
+        );
+    }
 
     for (dir_rel, mut files) in by_dir {
         files.sort_by(|a, b| a.0.cmp(&b.0));
@@ -2407,8 +2451,10 @@ pub fn repo_map_with_filter(
 
         for (filename, syms) in &files {
             out.push_str(&format!("  {filename}\n"));
-            for (kind, name) in syms {
-                out.push_str(&format!("    [{:<8}] {name}\n", kind));
+            if !paths_only {
+                for (kind, name) in syms {
+                    out.push_str(&format!("    [{:<8}] {name}\n", kind));
+                }
             }
         }
 
