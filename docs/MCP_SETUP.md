@@ -1,24 +1,24 @@
-# NeuroSiphon MCP Setup
+# CortexAST MCP Setup
 
-NeuroSiphon is a **Pure Rust MCP server** (stdio JSON-RPC). No editor-side add-on required.
+CortexAST is a **Pure Rust MCP server** (stdio JSON-RPC). No editor-side add-on required.
 
 ## 1) Get the Binary
 
 **Option A — Download pre-built binary** (recommended):
 
-Visit [Releases](https://github.com/DevsHero/NeuroSiphon/releases/latest) and download the binary for your OS. Make it executable on macOS/Linux:
+Visit [Releases](https://github.com/DevsHero/CortexAST/releases/latest) and download the binary for your OS. Make it executable on macOS/Linux:
 
 ```bash
-chmod +x neurosiphon-macos-aarch64   # adjust filename for your platform
+chmod +x cortexast-macos-aarch64   # adjust filename for your platform
 ```
 
 **Option B — Build from source**:
 
 ```bash
-git clone https://github.com/DevsHero/NeuroSiphon.git
-cd NeuroSiphon
+git clone https://github.com/DevsHero/CortexAST.git
+cd CortexAST
 cargo build --release
-# binary: ./target/release/neurosiphon
+# binary: ./target/release/cortexast
 ```
 
 ## 2) Connect an MCP Client
@@ -28,8 +28,8 @@ Example config (Claude Desktop style):
 ```json
 {
   "mcpServers": {
-    "neurosiphon": {
-      "command": "/absolute/path/to/neurosiphon",
+    "cortexast": {
+      "command": "/absolute/path/to/cortexast",
       "args": ["mcp"]
     }
   }
@@ -52,29 +52,29 @@ Restart your MCP client.
 
 Chronos (AST Time Machine):
 
-├─ neurosiphon_checkpoint_symbol(path, symbol_name, semantic_tag, repoPath?)
-│  └─ Saves a disk-backed snapshot under `.neurosiphon/checkpoints/` (default)
-├─ neurosiphon_list_checkpoints(repoPath?)
+├─ chronos_checkpoint(path, symbol_name, semantic_tag, repoPath?)
+│  └─ Saves a disk-backed snapshot under `.cortexast/checkpoints/` (default)
+├─ chronos_list(repoPath?)
 │  └─ Lists available semantic tags + stored symbols
-└─ neurosiphon_compare_symbol(symbol_name, tag_a, tag_b, path?, repoPath?)
+└─ chronos_compare(symbol_name, tag_a, tag_b, path?, repoPath?)
   └─ Displays Tag A and Tag B symbol code blocks (no unified diff)
 ```
 
 ## 4) Optional Repo Config
 
-NeuroSiphon reads `.neurosiphon.json` from the target repo root.
-It only accepts `.neurosiphon.json`.
+CortexAST reads `.cortexast.json` from the target repo root.
+It only accepts `.cortexast.json`.
 
 Note on real-world usage:
 
-- For MCP usage, `.neurosiphon.json` is re-read on every tool call, so config edits take effect on the next request (no server restart required).
-- If you change `vector_search.model` or `vector_search.chunk_lines`, NeuroSiphon will automatically reset/rebuild the local vector index on the next query.
+- For MCP usage, `.cortexast.json` is re-read on every tool call, so config edits take effect on the next request (no server restart required).
+- If you change `vector_search.model` or `vector_search.chunk_lines`, CortexAST will automatically reset/rebuild the local vector index on the next query.
 
 Example:
 
 ```json
 {
-  "output_dir": ".neurosiphon",
+  "output_dir": ".cortexast",
   "scan": {
     "exclude_dir_names": ["generated", "tmp", "fixtures"]
   },

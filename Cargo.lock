@@ -239,6 +239,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "cortexast"
+version = "1.4.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "glob",
+ "ignore",
+ "indicatif",
+ "model2vec-rs",
+ "quick-xml",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tree-sitter",
+ "tree-sitter-c-sharp",
+ "tree-sitter-dart",
+ "tree-sitter-go",
+ "tree-sitter-java",
+ "tree-sitter-php",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -870,35 +899,6 @@ dependencies = [
  "num-integer",
  "num-traits",
  "rawpointer",
-]
-
-[[package]]
-name = "neurosiphon"
-version = "1.3.1"
-dependencies = [
- "anyhow",
- "clap",
- "glob",
- "ignore",
- "indicatif",
- "model2vec-rs",
- "quick-xml",
- "rayon",
- "regex",
- "serde",
- "serde_json",
- "tokio",
- "toml",
- "tree-sitter",
- "tree-sitter-c-sharp",
- "tree-sitter-dart",
- "tree-sitter-go",
- "tree-sitter-java",
- "tree-sitter-php",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-typescript",
- "xxhash-rust",
 ]
 
 [[package]]

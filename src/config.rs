@@ -131,7 +131,7 @@ impl Default for VectorSearchConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            output_dir: PathBuf::from(".neurosiphon"),
+            output_dir: PathBuf::from(".cortexast"),
             scan: ScanConfig::default(),
             token_estimator: TokenEstimatorConfig::default(),
             skeleton_mode: true,
@@ -142,7 +142,7 @@ impl Default for Config {
 }
 
 pub fn load_config(repo_root: &Path) -> Config {
-    let primary = repo_root.join(".neurosiphon.json");
+    let primary = repo_root.join(".cortexast.json");
 
     let text = std::fs::read_to_string(&primary);
     let Ok(text) = text else { return Config::default() };

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::json;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use crate::config::load_config;
 use crate::chronos::{checkpoint_symbol, compare_symbol, list_checkpoints};
 use crate::inspector::{render_skeleton, read_symbol, find_usages, repo_map, call_hierarchy, run_diagnostics};
-use crate::mapper::{build_repo_map, build_repo_map_scoped};
 use crate::slicer::{slice_paths_to_xml, slice_to_xml};
 use crate::scanner::{scan_workspace, ScanOptions};
 use crate::vector_store::{CodebaseIndex, IndexJob};
@@ -15,7 +14,6 @@ use rayon::prelude::*;
 #[derive(Default)]
 pub struct ServerState {
     repo_root: Option<PathBuf>,
-    cached_repo_map: Option<serde_json::Value>,
 }
 
 impl ServerState {
@@ -38,8 +36,70 @@ impl ServerState {
             "result": {
                 "tools": [
                     {
+                        "name": "cortex_repo_map",
+                        "description": "🔥 ALWAYS USE THIS FIRST WHEN EXPLORING A REPO. Superior to `ls` or `tree`. Returns a highly condensed, bird's-eye map of the entire codebase showing only files and public symbols (Structs, Functions). Gives you instant architectural context without wasting tokens.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "repoPath": { "type": "string", "description": "Absolute path to the repo root" },
+                                "target_dir": { "type": "string", "description": "Directory to map (use '.' for whole repo)" }
+                            },
+                            "required": ["target_dir"]
+                        }
+                    },
+                    {
+                        "name": "cortex_read_symbol",
+                        "description": "⚡ CRITICAL: ALWAYS prefer this over `cat`, `head`, or reading full files. Extracts the exact, full source code of a specific symbol (function, struct, class) directly from the AST. Saves massive token bandwidth.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "repoPath": { "type": "string" },
+                                "path": { "type": "string", "description": "Path to the source file" },
+                                "symbol_name": { "type": "string", "description": "Exact name of the symbol (e.g. 'process_request')" }
+                            },
+                            "required": ["path", "symbol_name"]
+                        }
+                    },
+                    {
+                        "name": "cortex_find_usages",
+                        "description": "🎯 CRITICAL: ALWAYS prefer this over `grep`, `rg`, or `ag`. Finds 100% accurate semantic usages of a symbol across the workspace using AST. Completely ignores noise from comments and strings. Returns dense, highly relevant context.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "repoPath": { "type": "string" },
+                                "target_dir": { "type": "string", "description": "Directory to search in (use '.')" },
+                                "symbol_name": { "type": "string", "description": "Symbol name to trace" }
+                            },
+                            "required": ["target_dir", "symbol_name"]
+                        }
+                    },
+                    {
+                        "name": "cortex_call_hierarchy",
+                        "description": "🕸️ USE BEFORE REFACTORING: Analyzes the Blast Radius. Shows exactly who calls a function (Incoming) and what the function calls (Outgoing). Crucial for preventing breaking changes.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "repoPath": { "type": "string" },
+                                "target_dir": { "type": "string", "description": "Directory to search in (use '.')" },
+                                "symbol_name": { "type": "string" }
+                            },
+                            "required": ["target_dir", "symbol_name"]
+                        }
+                    },
+                    {
+                        "name": "cortex_diagnostics",
+                        "description": "🚨 Runs the compiler (e.g., cargo check, tsc) and maps errors directly to exact AST source lines. Use this instantly when code breaks.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "repoPath": { "type": "string" }
+                            },
+                            "required": ["repoPath"]
+                        }
+                    },
+                    {
                         "name": "get_context_slice",
-                        "description": "Generate an XML context slice for a target directory/file within a repo. Supports optional semantic vector search via the `query` parameter.",
+                        "description": "📦 USE FOR DEEP DIVES: Returns a token-budget-aware XML slice of a directory or file. Skeletonizes all source files (function bodies pruned, imports collapsed). Optionally accepts a semantic `query` to vector-search and return only the most relevant files first. Prefer this over reading raw files when you need multi-file context.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -53,139 +113,42 @@ impl ServerState {
                         }
                     },
                     {
-                        "name": "get_repo_map",
-                        "description": "Return a repository map (nodes + edges) for the repo or a scoped subdirectory",
+                        "name": "chronos_checkpoint",
+                        "description": "⏳ Save a safe 'save-state' snapshot of a specific AST symbol before you modify it. Use semantic tags like 'baseline' or 'pre-refactor'.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "repoPath": { "type": "string", "description": "Absolute path to the repo root" },
-                                "scope": { "type": "string", "description": "Optional subdirectory path to scope mapping" }
-                            }
-                        }
-                    },
-                    {
-                        "name": "read_file_skeleton",
-                        "description": "Return a low-token skeleton view of a file (function bodies pruned)",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "repoPath": { "type": "string", "description": "Absolute path to the repo root" },
-                                "path": { "type": "string", "description": "Path to the file (relative to repoPath, or absolute)" }
-                            },
-                            "required": ["path"]
-                        }
-                    },
-                    {
-                        "name": "read_file_full",
-                        "description": "Return the full raw content of a file",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "repoPath": { "type": "string", "description": "Absolute path to the repo root" },
-                                "path": { "type": "string", "description": "Path to the file (relative to repoPath, or absolute)" }
-                            },
-                            "required": ["path"]
-                        }
-                    },
-                    {
-                        "name": "neurosiphon_read_symbol",
-                        "description": "Extract the full, unpruned source code of a specific symbol (function, struct, impl block, class, etc.) from a file. Uses Tree-sitter to locate the exact declaration node — no skeleton pruning. Returns the complete implementation with a header showing the file:line range. Much cheaper than reading the entire file when you only need one symbol.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "repoPath": { "type": "string", "description": "Absolute path to the repo root (used to resolve relative paths)" },
-                                "path": { "type": "string", "description": "Path to the source file (relative to repoPath, or absolute)" },
-                                "symbol_name": { "type": "string", "description": "Exact name of the symbol to extract (e.g. 'process_request', 'ConvertRequest', 'MyStruct')" }
-                            },
-                            "required": ["path", "symbol_name"]
-                        }
-                    },
-                    {
-                        "name": "neurosiphon_checkpoint_symbol",
-                        "description": "Chronos: save a disk-backed snapshot of a specific symbol using a human-readable semantic tag (e.g. 'baseline', 'pre-refactor'). Stored under .neurosiphon/checkpoints/ by default.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "repoPath": { "type": "string", "description": "Absolute path to the repo root (used to resolve relative paths)" },
-                                "path": { "type": "string", "description": "Path to the source file (relative to repoPath, or absolute)" },
-                                "symbol_name": { "type": "string", "description": "Exact name of the symbol to snapshot" },
-                                "semantic_tag": { "type": "string", "description": "Human-readable tag for this checkpoint (e.g. 'baseline')" }
+                                "repoPath": { "type": "string" },
+                                "path": { "type": "string" },
+                                "symbol_name": { "type": "string" },
+                                "semantic_tag": { "type": "string" }
                             },
                             "required": ["path", "symbol_name", "semantic_tag"]
                         }
                     },
                     {
-                        "name": "neurosiphon_list_checkpoints",
-                        "description": "Chronos: list available disk-backed symbol checkpoints (grouped by semantic tag).",
+                        "name": "chronos_list",
+                        "description": "📋 List all saved Chronos snapshots grouped by semantic tag. Use this to recall what 'save states' are available before comparing.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "repoPath": { "type": "string", "description": "Absolute path to the repo root" }
+                                "repoPath": { "type": "string" }
                             }
                         }
                     },
                     {
-                        "name": "neurosiphon_compare_symbol",
-                        "description": "Chronos: compare two saved symbol snapshots by semantic tag. Output is side-by-side Markdown blocks (no unified diff).",
+                        "name": "chronos_compare",
+                        "description": "⚖️ CRITICAL: NEVER use `git diff` for comparing your AI refactoring. Use this to compare two Chronos snapshots of a symbol structurally. It ignores whitespace/line-number noise.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "repoPath": { "type": "string", "description": "Absolute path to the repo root" },
-                                "symbol_name": { "type": "string", "description": "Exact symbol name to compare" },
-                                "tag_a": { "type": "string", "description": "First tag (e.g. 'baseline')" },
-                                "tag_b": { "type": "string", "description": "Second tag (e.g. 'post-error-handling')" },
+                                "repoPath": { "type": "string" },
+                                "symbol_name": { "type": "string" },
+                                "tag_a": { "type": "string" },
+                                "tag_b": { "type": "string" },
                                 "path": { "type": "string", "description": "Optional: disambiguate if the same tag+symbol exists in multiple files" }
                             },
                             "required": ["symbol_name", "tag_a", "tag_b"]
-                        }
-                    },
-                    {
-                        "name": "neurosiphon_find_usages",
-                        "description": "Find all semantic usages of a symbol across the workspace using Tree-sitter AST analysis. Excludes false positives from comments and string literals. Returns a dense listing of every call site, type reference, and identifier usage with 2-line context. Works even when the project fails to compile.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "repoPath": { "type": "string", "description": "Absolute path to the repo root" },
-                                "target_dir": { "type": "string", "description": "Directory to search in (relative to repoPath, or absolute). Use '.' for the whole repo." },
-                                "symbol_name": { "type": "string", "description": "Symbol name to find usages of (e.g. 'process_request', 'ConvertRequest')" }
-                            },
-                            "required": ["target_dir", "symbol_name"]
-                        }
-                    },
-                    {
-                        "name": "neurosiphon_repo_map",
-                        "description": "Return a compact hierarchical text map of the entire codebase showing file paths and their exported/public symbols only. Designed for LLM consumption — gives a God's-eye overview of what exists and where without reading every file. Output is grouped by directory and capped at ~8 000 chars. Much cheaper than get_context_slice for navigation.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "repoPath": { "type": "string", "description": "Absolute path to the repo root" },
-                                "target_dir": { "type": "string", "description": "Directory to map (relative to repoPath, or absolute). Use '.' for the whole repo." }
-                            },
-                            "required": ["target_dir"]
-                        }
-                    },
-                    {
-                        "name": "neurosiphon_call_hierarchy",
-                        "description": "Analyse the complete call hierarchy for a named symbol. Returns three sections: (1) Definition — file and line where the symbol is declared. (2) Outgoing calls — identifiers called from within the symbol's body. (3) Incoming calls — all callers of this symbol with enclosing function context. Works without compilation via raw AST analysis.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "repoPath": { "type": "string", "description": "Absolute path to the repo root" },
-                                "target_dir": { "type": "string", "description": "Directory to search in (relative to repoPath, or absolute). Use '.' for the whole repo." },
-                                "symbol_name": { "type": "string", "description": "Exact symbol name to analyse (e.g. 'process_request', 'MyStruct')" }
-                            },
-                            "required": ["target_dir", "symbol_name"]
-                        }
-                    },
-                    {
-                        "name": "neurosiphon_diagnostics",
-                        "description": "Run the project's native compiler/type-checker and return a structured error report pinned to source locations with inline code context. Auto-detects project type: Cargo.toml → `cargo check --message-format=json`; package.json → `npx tsc --noEmit`. Errors capped at 20, warnings at 10. Each entry includes a 1-line context window.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "repoPath": { "type": "string", "description": "Absolute path to the project root (must contain Cargo.toml or package.json)" }
-                            },
-                            "required": ["repoPath"]
                         }
                     }
                 ]
@@ -237,29 +200,6 @@ impl ServerState {
                     Err(e) => err(format!("slice failed: {e}")),
                 }
             }
-            "get_repo_map" => {
-                let repo_root = self.repo_root_from_params(&args);
-                let scope = args.get("scope").and_then(|v| v.as_str()).map(PathBuf::from);
-
-                let map_json = if let Some(scope) = scope {
-                    match build_repo_map_scoped(&repo_root, &scope) {
-                        Ok(m) => serde_json::to_value(m).ok(),
-                        Err(_) => None,
-                    }
-                } else {
-                    match build_repo_map(&repo_root) {
-                        Ok(m) => serde_json::to_value(m).ok(),
-                        Err(_) => None,
-                    }
-                };
-
-                let Some(v) = map_json else {
-                    return err("Failed to build repo map".to_string());
-                };
-
-                self.cached_repo_map = Some(v.clone());
-                ok(serde_json::to_string(&v).unwrap_or_else(|_| "{}".to_string()))
-            }
             "read_file_skeleton" => {
                 let repo_root = self.repo_root_from_params(&args);
                 let Some(p) = args.get("path").and_then(|v| v.as_str()) else {
@@ -272,19 +212,7 @@ impl ServerState {
                     Err(e) => err(format!("skeleton failed: {e}")),
                 }
             }
-            "read_file_full" => {
-                let repo_root = self.repo_root_from_params(&args);
-                let Some(p) = args.get("path").and_then(|v| v.as_str()) else {
-                    return err("Missing path".to_string());
-                };
-                let abs = resolve_path(&repo_root, p);
-
-                match std::fs::read_to_string(&abs).with_context(|| format!("Failed to read {}", abs.display())) {
-                    Ok(s) => ok(s),
-                    Err(e) => err(format!("read failed: {e}")),
-                }
-            }
-            "neurosiphon_read_symbol" => {
+            "cortex_read_symbol" | "neurosiphon_read_symbol" => {
                 let repo_root = self.repo_root_from_params(&args);
                 let Some(p) = args.get("path").and_then(|v| v.as_str()) else {
                     return err("Missing path".to_string());
@@ -298,7 +226,7 @@ impl ServerState {
                     Err(e) => err(format!("read_symbol failed: {e}")),
                 }
             }
-            "neurosiphon_checkpoint_symbol" => {
+            "chronos_checkpoint" | "neurosiphon_checkpoint_symbol" => {
                 let repo_root = self.repo_root_from_params(&args);
                 let cfg = load_config(&repo_root);
                 let Some(p) = args.get("path").and_then(|v| v.as_str()) else {
@@ -317,7 +245,7 @@ impl ServerState {
                     Err(e) => err(format!("checkpoint_symbol failed: {e}")),
                 }
             }
-            "neurosiphon_list_checkpoints" => {
+            "chronos_list" | "neurosiphon_list_checkpoints" => {
                 let repo_root = self.repo_root_from_params(&args);
                 let cfg = load_config(&repo_root);
                 match list_checkpoints(&repo_root, &cfg) {
@@ -325,7 +253,7 @@ impl ServerState {
                     Err(e) => err(format!("list_checkpoints failed: {e}")),
                 }
             }
-            "neurosiphon_compare_symbol" => {
+            "chronos_compare" | "neurosiphon_compare_symbol" => {
                 let repo_root = self.repo_root_from_params(&args);
                 let cfg = load_config(&repo_root);
                 let Some(sym) = args.get("symbol_name").and_then(|v| v.as_str()) else {
@@ -343,7 +271,7 @@ impl ServerState {
                     Err(e) => err(format!("compare_symbol failed: {e}")),
                 }
             }
-            "neurosiphon_find_usages" => {
+            "cortex_find_usages" | "neurosiphon_find_usages" => {
                 let repo_root = self.repo_root_from_params(&args);
                 let Some(target_str) = args.get("target_dir").and_then(|v| v.as_str()) else {
                     return err("Missing target_dir".to_string());
@@ -357,7 +285,7 @@ impl ServerState {
                     Err(e) => err(format!("find_usages failed: {e}")),
                 }
             }
-            "neurosiphon_repo_map" => {
+            "cortex_repo_map" | "neurosiphon_repo_map" => {
                 let repo_root = self.repo_root_from_params(&args);
                 let Some(target_str) = args.get("target_dir").and_then(|v| v.as_str()) else {
                     return err("Missing target_dir".to_string());
@@ -368,7 +296,7 @@ impl ServerState {
                     Err(e) => err(format!("repo_map failed: {e}")),
                 }
             }
-            "neurosiphon_call_hierarchy" => {
+            "cortex_call_hierarchy" | "neurosiphon_call_hierarchy" => {
                 let repo_root = self.repo_root_from_params(&args);
                 let Some(target_str) = args.get("target_dir").and_then(|v| v.as_str()) else {
                     return err("Missing target_dir".to_string());
@@ -382,7 +310,7 @@ impl ServerState {
                     Err(e) => err(format!("call_hierarchy failed: {e}")),
                 }
             }
-            "neurosiphon_diagnostics" => {
+            "cortex_diagnostics" | "neurosiphon_diagnostics" => {
                 let repo_root = self.repo_root_from_params(&args);
                 match run_diagnostics(&repo_root) {
                     Ok(s) => ok(s),
@@ -524,7 +452,7 @@ pub fn run_stdio_server() -> Result<()> {
                 "result": {
                     "protocolVersion": msg.get("params").and_then(|p| p.get("protocolVersion")).cloned().unwrap_or(json!("2024-11-05")),
                     "capabilities": { "tools": { "listChanged": true } },
-                    "serverInfo": { "name": "neurosiphon-rs", "version": "0.2.0" }
+                    "serverInfo": { "name": "cortexast", "version": "0.2.0" }
                 }
             }),
             "ping" => json!({

@@ -63,7 +63,7 @@ fn repomix_default_overrides(repo_root: &Path, exclude_dir_names: &[String]) -> 
         ".vscode-test",
         ".vscode",
         "out",
-        ".neurosiphon",
+        ".cortexast",
         ".turbo",
         ".svelte-kit",
         // Rust
@@ -95,7 +95,7 @@ fn repomix_default_overrides(repo_root: &Path, exclude_dir_names: &[String]) -> 
         ".gradle",
         ".m2",
         // Misc
-        ".neurosiphon",
+        ".cortexast",
         ".terraform",
         ".serverless",
         "tmp",
