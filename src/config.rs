@@ -98,7 +98,7 @@ pub struct VectorSearchConfig {
 impl Default for VectorSearchConfig {
     fn default() -> Self {
         Self {
-            model: "minishlab/potion-base-8M".to_string(),
+            model: "minishlab/potion-retrieval-32M".to_string(),
             chunk_lines: 40,
             default_query_limit: 30,
         }
