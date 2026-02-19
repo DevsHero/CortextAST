@@ -2335,12 +2335,15 @@ pub fn repo_map_with_filter(
     ignore_gitignore: bool,
 ) -> Result<String> {
     use ignore::WalkBuilder;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
 
     // Absolute hard cap to prevent MCP clients from offloading huge payloads
     // into resource files (which breaks agent loops).
-    const HARD_MAX_CHARS_TOTAL: usize = 9_000;
+    const HARD_MAX_CHARS_TOTAL: usize = 8_000;
     const MAX_SYMS_PER_FILE: usize = 20;
+
+    // If the repo is large enough, force summary-first mode (no symbols).
+    const STRICT_SUMMARY_THRESHOLD: usize = 50;
 
     // Progressive disclosure thresholds.
     const DEEP_MAX_FILES: usize = 30;
@@ -2358,7 +2361,7 @@ pub fn repo_map_with_filter(
             .join(target_dir)
     };
 
-    let walker = WalkBuilder::new(&abs_dir)
+    let walker_filtered = WalkBuilder::new(&abs_dir)
         .standard_filters(!ignore_gitignore)
         .hidden(true)
         .build();
@@ -2366,31 +2369,42 @@ pub fn repo_map_with_filter(
     let cfg = language_config();
     let filter_lc = search_filter.map(|s| s.to_ascii_lowercase());
 
-    // Pass 1: collect supported files + dirs without reading file contents.
-    // We only read files for symbols in Deep mode (<= 30 files).
+    // Pass 1: collect files + diagnostics without reading file contents.
+    // We only read files for symbols in Deep mode (<= 30 files and <= STRICT_SUMMARY_THRESHOLD).
     let mut by_dir_files: BTreeMap<String, Vec<(String, PathBuf)>> = BTreeMap::new();
     let mut unique_dirs: BTreeSet<String> = BTreeSet::new();
-    let mut total_files: usize = 0;
 
-    for entry_result in walker {
-        let Ok(entry) = entry_result else { continue };
+    let mut kept_source_files: usize = 0;
+    let mut dropped_by_unsupported_lang: usize = 0;
+
+    let mut sample_dropped: Vec<String> = Vec::new();
+    let mut sample_unsupported: Vec<String> = Vec::new();
+    let mut filtered_paths: HashSet<String> = HashSet::new();
+
+    let mut filtered_file_count: usize = 0;
+    let mut filtered_error_count: usize = 0;
+
+    for entry_result in walker_filtered {
+        let entry = match entry_result {
+            Ok(e) => e,
+            Err(_) => {
+                filtered_error_count += 1;
+                continue;
+            }
+        };
         let path = entry.path();
         if !path.is_file() {
             continue;
         }
-        if cfg.driver_for_path(path).is_none() {
-            continue;
-        }
+
+        filtered_file_count += 1;
 
         let rel_from_target = match path.strip_prefix(&abs_dir) {
             Ok(r) => r,
             Err(_) => continue,
         };
         let rel_path = rel_from_target.to_string_lossy().replace('\\', "/");
-        let dir_rel = rel_from_target
-            .parent()
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_default();
+        filtered_paths.insert(rel_path.clone());
 
         let filename = path
             .file_name()
@@ -2398,14 +2412,28 @@ pub fn repo_map_with_filter(
             .to_string_lossy()
             .to_string();
 
-        // Optional narrowing: path/filename filter (fast + deterministic).
+        let dir_rel = rel_from_target
+            .parent()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+
+        // Track unsupported languages explicitly so agents know why a file is missing.
+        if cfg.driver_for_path(path).is_none() {
+            dropped_by_unsupported_lang += 1;
+            if sample_unsupported.len() < 5 {
+                sample_unsupported.push(rel_path.clone());
+            }
+            continue;
+        }
+
+        // Optional narrowing: path/filename filter (case-insensitive).
         if let Some(f) = &filter_lc {
             if !rel_path.to_ascii_lowercase().contains(f) && !filename.to_ascii_lowercase().contains(f) {
                 continue;
             }
         }
 
-        total_files += 1;
+        kept_source_files += 1;
         if !dir_rel.is_empty() {
             unique_dirs.insert(dir_rel.clone());
         }
@@ -2415,6 +2443,60 @@ pub fn repo_map_with_filter(
             .push((filename, path.to_path_buf()));
     }
 
+    // Compute gitignore/ignore-filter drops by comparing against an unfiltered walk.
+    let (scanned_total, dropped_by_gitignore_or_error) = if !ignore_gitignore {
+        let walker_all = WalkBuilder::new(&abs_dir)
+            .standard_filters(false)
+            .hidden(true)
+            .build();
+
+        let mut all_file_count: usize = 0;
+        let mut all_error_count: usize = 0;
+
+        for entry_result in walker_all {
+            let entry = match entry_result {
+                Ok(e) => e,
+                Err(_) => {
+                    all_error_count += 1;
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            all_file_count += 1;
+
+            if sample_dropped.len() < 5 {
+                if let Ok(rel_from_target) = path.strip_prefix(&abs_dir) {
+                    let rel_path = rel_from_target.to_string_lossy().replace('\\', "/");
+                    if !filtered_paths.contains(&rel_path) {
+                        sample_dropped.push(rel_path);
+                    }
+                }
+            }
+        }
+
+        let scanned_total = all_file_count.saturating_add(all_error_count);
+        let dropped_by_gitignore_or_error = all_file_count
+            .saturating_sub(filtered_file_count)
+            .saturating_add(filtered_error_count);
+        (scanned_total, dropped_by_gitignore_or_error)
+    } else {
+        // With ignore_gitignore=true, the filtered walker is the full view.
+        let scanned_total = filtered_file_count.saturating_add(filtered_error_count);
+        let dropped_by_gitignore_or_error = filtered_error_count;
+        (scanned_total, dropped_by_gitignore_or_error)
+    };
+
+    // Merge unsupported samples into the dropped sample list (max 5 total).
+    for p in sample_unsupported {
+        if sample_dropped.len() >= 5 {
+            break;
+        }
+        sample_dropped.push(p);
+    }
+
     let mut out = String::new();
     let root_name = abs_dir
         .file_name()
@@ -2422,7 +2504,7 @@ pub fn repo_map_with_filter(
         .to_string_lossy();
 
     // ── 0-file guard (enterprise diagnostics) ───────────────────────────
-    if total_files == 0 {
+    if kept_source_files == 0 {
         return Err(anyhow!(
             "Error: 0 supported source files found in '{}'.\n\
 Diagnostics:\n\
@@ -2441,9 +2523,9 @@ Supported extensions include: rs, ts, tsx, js, jsx, py, go.",
         FoldersOnly,
     }
 
-    let disclosure = if total_files <= DEEP_MAX_FILES {
+    let disclosure = if kept_source_files <= DEEP_MAX_FILES && kept_source_files <= STRICT_SUMMARY_THRESHOLD {
         Disclosure::Deep
-    } else if total_files <= FILES_ONLY_MAX_FILES {
+    } else if kept_source_files <= FILES_ONLY_MAX_FILES {
         Disclosure::FilesOnly
     } else {
         Disclosure::FoldersOnly
@@ -2477,12 +2559,29 @@ Supported extensions include: rs, ts, tsx, js, jsx, py, go.",
         }
     };
 
-    push(&format!("{root_name}/   ({total_files} files)\n"));
+    let dropped_total = dropped_by_gitignore_or_error.saturating_add(dropped_by_unsupported_lang);
+    push(&format!("{root_name}/   ({kept_source_files} files)\n"));
+    push(&format!(
+        "> 📊 Scanned: {scanned_total} items | Kept Source Files: {kept_source_files} | Dropped: {dropped_total} (ignored/errors: {dropped_by_gitignore_or_error}, unsupported: {dropped_by_unsupported_lang})\n"
+    ));
+    if !sample_dropped.is_empty() {
+        let joined = sample_dropped
+            .iter()
+            .map(|p| format!("'{}'", p))
+            .collect::<Vec<_>>()
+            .join(", ");
+        push(&format!("> 🗑️ Sample dropped files: {joined}\n"));
+    }
+    push("\n");
 
     match disclosure {
         Disclosure::Deep => {}
         Disclosure::FilesOnly => {
-            push("> ⚠️ Repo Overview: Showing files only (symbols hidden to save context). Target a specific sub-folder to see symbols.\n\n");
+            if kept_source_files > STRICT_SUMMARY_THRESHOLD {
+                push("> ⚠️ LARGE REPO DETECTED (50+ files). Enforcing Summary-First mode. Symbols are hidden to save context. Use 'map_repo' on specific sub-folders or 'find_usages' to dig deeper.\n\n");
+            } else {
+                push("> ⚠️ Repo Overview: Showing files only (symbols hidden to save context). Target a specific sub-folder to see symbols.\n\n");
+            }
         }
         Disclosure::FoldersOnly => {
             push("> ⚠️ Massive Directory: Showing folders only. You MUST run map_repo on a specific sub-folder to see files.\n\n");
