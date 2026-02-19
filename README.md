@@ -281,6 +281,11 @@ NeuroSiphon ships production-grade support for the most complex repository struc
 
 #### `.neurosiphon.json` — Huge-Codebase Config
 
+Notes:
+
+- NeuroSiphon re-reads `.neurosiphon.json` on each run/request; changes apply immediately on the next slice/query.
+- Changing `vector_search.model` or `vector_search.chunk_lines` triggers an automatic vector-index rebuild the next time you use `--query` (or MCP query mode).
+
 ```json
 {
   "vector_search": {

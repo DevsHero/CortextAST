@@ -303,6 +303,12 @@ pub struct CodebaseIndex {
     store: IndexStore,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IndexMetaV2 {
+    model_id: String,
+    chunk_lines: usize,
+}
+
 impl CodebaseIndex {
     pub fn open(repo_root: &Path, db_dir: &Path, model_id: &str, chunk_lines: usize) -> Result<Self> {
         let db_dir = if db_dir.is_absolute() {
@@ -314,16 +320,42 @@ impl CodebaseIndex {
 
         let model = StaticModel::from_pretrained(model_id, None, None, None)?;
 
-        let index_path = db_dir.join("embeddings.json");
-        let store = IndexStore::load(&index_path);
+        let chunk_lines = chunk_lines.clamp(1, 200);
 
-        // Migrate: remove legacy meta file.
-        let _ = std::fs::remove_file(db_dir.join("index_meta.json"));
+        let index_path = db_dir.join("embeddings.json");
+        let mut store = IndexStore::load(&index_path);
+
+        // Meta: ensure we don't mix embeddings from different models/chunking.
+        // This enables config changes to take effect immediately without restarting the MCP server.
+        let meta_path = db_dir.join("index_meta_v2.json");
+        let meta_disk: Option<IndexMetaV2> = std::fs::read_to_string(&meta_path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<IndexMetaV2>(&t).ok());
+
+        if let Some(meta) = meta_disk {
+            if meta.model_id != model_id || meta.chunk_lines != chunk_lines {
+                crate::debug_log!(
+                    "[neurosiphon] vector index config changed (model/chunk_lines); rebuilding index…"
+                );
+                store = IndexStore::default();
+                let _ = std::fs::remove_file(&index_path);
+            }
+        }
+
+        // Best-effort: persist current meta.
+        let _ = std::fs::write(
+            &meta_path,
+            serde_json::to_string(&IndexMetaV2 {
+                model_id: model_id.to_string(),
+                chunk_lines,
+            })
+            .unwrap_or_else(|_| "{}".to_string()),
+        );
 
         Ok(Self {
             repo_root: repo_root.to_path_buf(),
             model,
-            chunk_lines: chunk_lines.clamp(1, 200),
+            chunk_lines,
             index_path,
             store,
         })

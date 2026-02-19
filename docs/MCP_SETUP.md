@@ -56,6 +56,11 @@ Restart your MCP client.
 NeuroSiphon reads `.neurosiphon.json` from the target repo root.
 It only accepts `.neurosiphon.json`.
 
+Note on real-world usage:
+
+- For MCP usage, `.neurosiphon.json` is re-read on every tool call, so config edits take effect on the next request (no server restart required).
+- If you change `vector_search.model` or `vector_search.chunk_lines`, NeuroSiphon will automatically reset/rebuild the local vector index on the next query.
+
 Example:
 
 ```json
