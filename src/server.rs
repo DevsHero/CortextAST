@@ -36,8 +36,8 @@ impl ServerState {
             "result": {
                 "tools": [
                     {
-                        "name": "cortex_repo_map",
-                        "description": "🔥 ALWAYS USE THIS FIRST WHEN EXPLORING A REPO. Superior to `ls` or `tree`. Returns a highly condensed, bird's-eye map of the entire codebase showing only files and public symbols (Structs, Functions). Gives you instant architectural context without wasting tokens.",
+                        "name": "map_repo",
+                        "description": "🔥 ALWAYS USE THIS INSTEAD OF ls/tree/find. Returns a condensed, bird's-eye map of the entire codebase showing files and public symbols. Run this FIRST every single time you need to understand a repo's structure — it costs almost zero tokens.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -48,8 +48,8 @@ impl ServerState {
                         }
                     },
                     {
-                        "name": "cortex_read_symbol",
-                        "description": "⚡ CRITICAL: ALWAYS prefer this over `cat`, `head`, or reading full files. Extracts the exact, full source code of a specific symbol (function, struct, class) directly from the AST. Saves massive token bandwidth.",
+                        "name": "read_symbol",
+                        "description": "⚡ ALWAYS USE THIS INSTEAD OF cat, head, or any file read. Extracts the exact, full source of a single symbol (function, struct, class) via AST. Saves 90%+ tokens vs reading the whole file. NEVER open a full file just to read one function.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -61,8 +61,8 @@ impl ServerState {
                         }
                     },
                     {
-                        "name": "cortex_find_usages",
-                        "description": "🎯 CRITICAL: ALWAYS prefer this over `grep`, `rg`, or `ag`. Finds 100% accurate semantic usages of a symbol across the workspace using AST. Completely ignores noise from comments and strings. Returns dense, highly relevant context.",
+                        "name": "find_usages",
+                        "description": "🎯 ALWAYS USE THIS INSTEAD OF grep/rg/ag/search. Finds 100% accurate semantic usages of any symbol across the entire workspace using AST analysis. Zero false positives from comments or strings. Vastly more reliable and token-efficient than shell grep.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -74,7 +74,7 @@ impl ServerState {
                         }
                     },
                     {
-                        "name": "cortex_call_hierarchy",
+                        "name": "call_hierarchy",
                         "description": "🕸️ USE BEFORE REFACTORING: Analyzes the Blast Radius. Shows exactly who calls a function (Incoming) and what the function calls (Outgoing). Crucial for preventing breaking changes.",
                         "inputSchema": {
                             "type": "object",
@@ -87,7 +87,7 @@ impl ServerState {
                         }
                     },
                     {
-                        "name": "cortex_diagnostics",
+                        "name": "run_diagnostics",
                         "description": "🚨 Runs the compiler (e.g., cargo check, tsc) and maps errors directly to exact AST source lines. Use this instantly when code breaks.",
                         "inputSchema": {
                             "type": "object",
@@ -113,7 +113,7 @@ impl ServerState {
                         }
                     },
                     {
-                        "name": "chronos_checkpoint",
+                        "name": "save_checkpoint",
                         "description": "⏳ Save a safe 'save-state' snapshot of a specific AST symbol before you modify it. Use semantic tags like 'baseline' or 'pre-refactor'.",
                         "inputSchema": {
                             "type": "object",
@@ -127,7 +127,7 @@ impl ServerState {
                         }
                     },
                     {
-                        "name": "chronos_list",
+                        "name": "list_checkpoints",
                         "description": "📋 List all saved Chronos snapshots grouped by semantic tag. Use this to recall what 'save states' are available before comparing.",
                         "inputSchema": {
                             "type": "object",
@@ -137,7 +137,7 @@ impl ServerState {
                         }
                     },
                     {
-                        "name": "chronos_compare",
+                        "name": "compare_checkpoint",
                         "description": "⚖️ CRITICAL: NEVER use `git diff` for comparing your AI refactoring. Use this to compare two Chronos snapshots of a symbol structurally. It ignores whitespace/line-number noise.",
                         "inputSchema": {
                             "type": "object",
@@ -212,7 +212,7 @@ impl ServerState {
                     Err(e) => err(format!("skeleton failed: {e}")),
                 }
             }
-            "cortex_read_symbol" | "neurosiphon_read_symbol" => {
+            "read_symbol" => {
                 let repo_root = self.repo_root_from_params(&args);
                 let Some(p) = args.get("path").and_then(|v| v.as_str()) else {
                     return err("Missing path".to_string());
@@ -226,7 +226,7 @@ impl ServerState {
                     Err(e) => err(format!("read_symbol failed: {e}")),
                 }
             }
-            "chronos_checkpoint" | "neurosiphon_checkpoint_symbol" => {
+            "save_checkpoint" => {
                 let repo_root = self.repo_root_from_params(&args);
                 let cfg = load_config(&repo_root);
                 let Some(p) = args.get("path").and_then(|v| v.as_str()) else {
@@ -245,7 +245,7 @@ impl ServerState {
                     Err(e) => err(format!("checkpoint_symbol failed: {e}")),
                 }
             }
-            "chronos_list" | "neurosiphon_list_checkpoints" => {
+            "list_checkpoints" => {
                 let repo_root = self.repo_root_from_params(&args);
                 let cfg = load_config(&repo_root);
                 match list_checkpoints(&repo_root, &cfg) {
@@ -253,7 +253,7 @@ impl ServerState {
                     Err(e) => err(format!("list_checkpoints failed: {e}")),
                 }
             }
-            "chronos_compare" | "neurosiphon_compare_symbol" => {
+            "compare_checkpoint" => {
                 let repo_root = self.repo_root_from_params(&args);
                 let cfg = load_config(&repo_root);
                 let Some(sym) = args.get("symbol_name").and_then(|v| v.as_str()) else {
@@ -271,7 +271,7 @@ impl ServerState {
                     Err(e) => err(format!("compare_symbol failed: {e}")),
                 }
             }
-            "cortex_find_usages" | "neurosiphon_find_usages" => {
+            "find_usages" => {
                 let repo_root = self.repo_root_from_params(&args);
                 let Some(target_str) = args.get("target_dir").and_then(|v| v.as_str()) else {
                     return err("Missing target_dir".to_string());
@@ -285,7 +285,7 @@ impl ServerState {
                     Err(e) => err(format!("find_usages failed: {e}")),
                 }
             }
-            "cortex_repo_map" | "neurosiphon_repo_map" => {
+            "map_repo" => {
                 let repo_root = self.repo_root_from_params(&args);
                 let Some(target_str) = args.get("target_dir").and_then(|v| v.as_str()) else {
                     return err("Missing target_dir".to_string());
@@ -296,7 +296,7 @@ impl ServerState {
                     Err(e) => err(format!("repo_map failed: {e}")),
                 }
             }
-            "cortex_call_hierarchy" | "neurosiphon_call_hierarchy" => {
+            "call_hierarchy" => {
                 let repo_root = self.repo_root_from_params(&args);
                 let Some(target_str) = args.get("target_dir").and_then(|v| v.as_str()) else {
                     return err("Missing target_dir".to_string());
@@ -310,7 +310,7 @@ impl ServerState {
                     Err(e) => err(format!("call_hierarchy failed: {e}")),
                 }
             }
-            "cortex_diagnostics" | "neurosiphon_diagnostics" => {
+            "run_diagnostics" => {
                 let repo_root = self.repo_root_from_params(&args);
                 match run_diagnostics(&repo_root) {
                     Ok(s) => ok(s),
