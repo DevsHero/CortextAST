@@ -2064,3 +2064,611 @@ fn extract_context_lines(lines: &[&str], target_0: usize, ctx: usize) -> String 
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+// ---------------------------------------------------------------------------
+// Tool: neurosiphon_repo_map — The God's Eye View
+// ---------------------------------------------------------------------------
+
+/// Build a human-readable hierarchical text map of the codebase showing file
+/// paths and their **exported / public symbols** only.
+///
+/// Designed for LLM consumption: compact, unambiguous, and token-budgeted.
+/// Output is grouped by directory. The total output is capped at ~8 000 chars.
+///
+/// # Arguments
+/// * `target_dir` — root directory to walk (respects `.gitignore`)
+///
+/// # Output example
+/// ```text
+/// project/   (12 files)
+///
+/// src/
+///   handler.rs
+///     [fn      ] handle_request
+///     [fn      ] handle_response
+///   models/
+///     user.rs
+///       [struct  ] User
+/// ```
+pub fn repo_map(target_dir: &Path) -> Result<String> {
+    use ignore::WalkBuilder;
+    use std::collections::BTreeMap;
+
+    const MAX_EXPORTS_PER_FILE: usize = 20;
+    const MAX_CHARS_TOTAL: usize = 8_000;
+
+    let abs_dir: PathBuf = if target_dir.is_absolute() {
+        target_dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("Failed to get cwd")?
+            .join(target_dir)
+    };
+
+    let walker = WalkBuilder::new(&abs_dir)
+        .standard_filters(true)
+        .hidden(true)
+        .build();
+
+    let cfg = language_config();
+
+    // dir_rel → Vec<(filename, Vec<(kind, name)>)>
+    let mut by_dir: BTreeMap<String, Vec<(String, Vec<(String, String)>)>> = BTreeMap::new();
+
+    for entry_result in walker {
+        let Ok(entry) = entry_result else { continue };
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if cfg.driver_for_path(path).is_none() {
+            continue;
+        }
+
+        let rel_from_target = match path.strip_prefix(&abs_dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let dir_rel = rel_from_target
+            .parent()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+
+        let filename = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        let exports: Vec<(String, String)> = match analyze_file(path) {
+            Ok(file_syms) => {
+                let kind_map: HashMap<String, String> = file_syms
+                    .symbols
+                    .iter()
+                    .map(|s| (s.name.clone(), s.kind.clone()))
+                    .collect();
+                file_syms
+                    .exports
+                    .iter()
+                    .map(|name| {
+                        let kind = kind_map
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_else(|| "symbol".to_string());
+                        (kind, name.clone())
+                    })
+                    .take(MAX_EXPORTS_PER_FILE)
+                    .collect()
+            }
+            Err(_) => vec![],
+        };
+
+        by_dir.entry(dir_rel).or_default().push((filename, exports));
+    }
+
+    let mut out = String::new();
+    let root_name = abs_dir
+        .file_name()
+        .unwrap_or_else(|| abs_dir.as_os_str())
+        .to_string_lossy();
+    let total_files: usize = by_dir.values().map(|v| v.len()).sum();
+    out.push_str(&format!("{root_name}/   ({total_files} files)\n"));
+
+    for (dir_rel, mut files) in by_dir {
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+
+        if !dir_rel.is_empty() {
+            out.push_str(&format!("\n{dir_rel}/\n"));
+        }
+
+        for (filename, exports) in &files {
+            out.push_str(&format!("  {filename}\n"));
+            for (kind, name) in exports {
+                out.push_str(&format!("    [{:<8}] {name}\n", kind));
+            }
+        }
+
+        if out.len() > MAX_CHARS_TOTAL {
+            out.push_str("\n... (output truncated — token limit reached)\n");
+            break;
+        }
+    }
+
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Tool: neurosiphon_call_hierarchy — The Call Graph
+// ---------------------------------------------------------------------------
+
+/// Analyse the complete call hierarchy for a named symbol.
+///
+/// Returns three sections:
+/// - **Definition** — file and line where the symbol is declared.
+/// - **Outgoing calls** — identifiers called *from within* the symbol's body,
+///   extracted via `call_expression` / `method_call_expression` AST nodes.
+/// - **Incoming calls** — files and enclosing functions that call this symbol,
+///   located by scanning every supported source file under `target_dir`.
+///
+/// Works without compilation — uses the raw tree-sitter AST, so it operates
+/// even on partially broken code.
+///
+/// # Arguments
+/// * `target_dir`   — directory to search (respects `.gitignore`)
+/// * `symbol_name`  — exact symbol name (case-sensitive)
+pub fn call_hierarchy(target_dir: &Path, symbol_name: &str) -> Result<String> {
+    use ignore::WalkBuilder;
+
+    let abs_dir: PathBuf = if target_dir.is_absolute() {
+        target_dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("Failed to get cwd")?
+            .join(target_dir)
+    };
+
+    let cfg = language_config();
+
+    struct DefSite {
+        file: String,
+        line_1: u32,
+        kind: String,
+    }
+
+    let mut definitions: Vec<DefSite> = Vec::new();
+    let mut outgoing_calls: Vec<(String, u32, String)> = Vec::new(); // (callee, abs_line_1, file)
+    let mut callers: Vec<(String, u32, Option<String>, String)> = Vec::new(); // (file, line_1, enclosing, ctx)
+
+    let walker = WalkBuilder::new(&abs_dir)
+        .standard_filters(true)
+        .hidden(true)
+        .build();
+
+    for entry_result in walker {
+        let Ok(entry) = entry_result else { continue };
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if cfg.driver_for_path(path).is_none() {
+            continue;
+        }
+
+        let Ok(raw) = std::fs::read(path) else { continue };
+        if raw.contains(&0u8) {
+            continue;
+        }
+        let Ok(source_text) = std::str::from_utf8(&raw) else { continue };
+        if !source_text.contains(symbol_name) {
+            continue;
+        }
+
+        let driver = cfg.driver_for_path(path).unwrap();
+        let language = driver.language_for_path(path);
+        let source = source_text.as_bytes();
+
+        let mut parser = Parser::new();
+        if parser.set_language(&language).is_err() {
+            continue;
+        }
+        let Some(tree) = parser.parse(source_text, None) else { continue };
+        let root = tree.root_node();
+
+        let text_lines: Vec<&str> = source_text.lines().collect();
+        let display_path = path.to_string_lossy().to_string();
+
+        // Extract skeleton (symbol list) for this file — used for definition
+        // detection AND for resolving enclosing function context.
+        let syms = match driver.extract_skeleton(path, source, root, language.clone()) {
+            Ok(s) => s,
+            Err(_) => vec![],
+        };
+
+        // 1) Definitions + outgoing calls from definition body
+        for sym in &syms {
+            if sym.name != symbol_name {
+                continue;
+            }
+            definitions.push(DefSite {
+                file: display_path.clone(),
+                line_1: sym.line + 1,
+                kind: sym.kind.clone(),
+            });
+
+            // Re-parse the definition body text to extract outgoing call targets.
+            let body_start = sym.line as usize;
+            let body_end = (sym.line_end as usize + 1).min(text_lines.len());
+            let body_text: String = text_lines[body_start..body_end].join("\n");
+            let body_bytes = body_text.as_bytes();
+
+            let mut body_parser = Parser::new();
+            if body_parser.set_language(&language).is_ok() {
+                if let Some(body_tree) = body_parser.parse(&body_text, None) {
+                    let body_root = body_tree.root_node();
+                    let mut raw_calls: Vec<(String, u32)> = Vec::new();
+                    extract_call_targets_from_body(body_root, body_bytes, &mut raw_calls);
+                    for (callee, li_in_body) in raw_calls {
+                        let abs_line_1 = sym.line + 1 + li_in_body;
+                        outgoing_calls.push((callee, abs_line_1, display_path.clone()));
+                    }
+                }
+            }
+        }
+
+        // 2) Incoming call sites — find call_expression nodes targeting symbol_name
+        let mut call_rows: Vec<u32> = Vec::new();
+        collect_call_refs(root, source, symbol_name, &mut call_rows);
+        call_rows.sort();
+        call_rows.dedup();
+
+        for row_0 in call_rows {
+            // Find the tightest enclosing function/method
+            let enclosing = syms
+                .iter()
+                .filter(|s| {
+                    s.line <= row_0
+                        && row_0 <= s.line_end
+                        && matches!(
+                            s.kind.as_str(),
+                            "fn" | "function" | "method" | "arrow_function"
+                        )
+                })
+                .min_by_key(|s| row_0 - s.line)
+                .map(|s| format!("{} {}()", s.kind, s.name));
+
+            let ctx = extract_context_lines(&text_lines, row_0 as usize, 2);
+            callers.push((display_path.clone(), row_0 + 1, enclosing, ctx));
+        }
+    }
+
+    // ── Format Markdown output ────────────────────────────────────────────
+    let mut out = format!("## Call Hierarchy: `{symbol_name}`\n\n");
+
+    if definitions.is_empty() {
+        out.push_str(
+            "> No definition found in target_dir — showing inbound call sites only.\n\n",
+        );
+    } else {
+        out.push_str("### Definition\n");
+        for d in &definitions {
+            out.push_str(&format!("- `{}` at {}:L{}\n", d.kind, d.file, d.line_1));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("### Outgoing Calls (made by this symbol)\n");
+    if outgoing_calls.is_empty() {
+        out.push_str("- *(none detected)*\n");
+    } else {
+        outgoing_calls.sort_by_key(|(_, line, _)| *line);
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (callee, line, file) in &outgoing_calls {
+            if seen.insert(callee.clone()) {
+                out.push_str(&format!("- `{callee}` — {file}:L{line}\n"));
+            }
+        }
+    }
+    out.push('\n');
+
+    const MAX_CALLERS: usize = 30;
+    out.push_str("### Incoming Calls (callers of this symbol)\n");
+    if callers.is_empty() {
+        out.push_str("- *(none detected)*\n");
+    } else {
+        for (file, line_1, enclosing, ctx) in callers.iter().take(MAX_CALLERS) {
+            let enc_str = enclosing.as_deref().unwrap_or("(top-level)");
+            out.push_str(&format!("\n**{file}:{line_1}** in `{enc_str}`\n"));
+            out.push_str(&format!("```\n{ctx}\n```\n"));
+        }
+        if callers.len() > MAX_CALLERS {
+            out.push_str(&format!(
+                "\n*... {} more callers not shown*\n",
+                callers.len() - MAX_CALLERS
+            ));
+        }
+    }
+
+    Ok(out)
+}
+
+/// Collect all call sites of `symbol_name` by walking the AST for
+/// `call_expression` / `method_call_expression` nodes whose callable resolves
+/// to `symbol_name` as the trailing identifier component.
+fn collect_call_refs(node: Node, source: &[u8], symbol_name: &str, out: &mut Vec<u32>) {
+    let kind = node.kind();
+    if kind.contains("comment") || kind.contains("string") || kind.contains("template") {
+        return;
+    }
+
+    if matches!(kind, "call_expression" | "method_call_expression") {
+        let target_node = node
+            .child_by_field_name("function")
+            .or_else(|| node.child_by_field_name("method"))
+            .or_else(|| node.child_by_field_name("name"));
+
+        if let Some(target) = target_node {
+            let text =
+                std::str::from_utf8(&source[target.start_byte()..target.end_byte()]).unwrap_or("");
+            let last = text
+                .rsplit(|c: char| c == '.' || c == ':')
+                .next()
+                .unwrap_or("")
+                .trim();
+            if last == symbol_name {
+                out.push(node.start_position().row as u32);
+            }
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_call_refs(child, source, symbol_name, out);
+    }
+}
+
+/// Extract all outgoing call targets from an AST subtree (typically a function
+/// body). Returns `(callee_name, 0-indexed_line_in_body)` pairs.
+fn extract_call_targets_from_body(node: Node, source: &[u8], out: &mut Vec<(String, u32)>) {
+    let kind = node.kind();
+    if kind.contains("comment") || kind.contains("string") || kind.contains("template") {
+        return;
+    }
+
+    if matches!(kind, "call_expression" | "method_call_expression") {
+        let target_node = node
+            .child_by_field_name("function")
+            .or_else(|| node.child_by_field_name("method"))
+            .or_else(|| node.child_by_field_name("name"));
+
+        if let Some(target) = target_node {
+            let text =
+                std::str::from_utf8(&source[target.start_byte()..target.end_byte()]).unwrap_or("");
+            let last = text
+                .rsplit(|c: char| c == '.' || c == ':')
+                .next()
+                .unwrap_or("")
+                .trim();
+            if !last.is_empty() && last.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                out.push((last.to_string(), node.start_position().row as u32));
+            }
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        extract_call_targets_from_body(child, source, out);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tool: neurosiphon_diagnostics — The Compiler Oracle
+// ---------------------------------------------------------------------------
+
+/// Run the project's native diagnostics tool and return a structured report
+/// of errors and warnings, each pinned to its source location with inline
+/// code context.
+///
+/// **Project detection:**
+/// - `Cargo.toml` present → `cargo check --message-format=json --quiet`
+/// - `package.json` present → `npx tsc --noEmit --pretty false`
+///
+/// Errors are capped at 20; warnings at 10. Each entry includes a 1-line
+/// code context window extracted from the source file.
+///
+/// # Arguments
+/// * `repo_root` — root directory of the project
+pub fn run_diagnostics(repo_root: &Path) -> Result<String> {
+    use std::process::{Command, Stdio};
+
+    let abs_root: PathBuf = if repo_root.is_absolute() {
+        repo_root.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("Failed to get cwd")?
+            .join(repo_root)
+    };
+
+    let has_cargo = abs_root.join("Cargo.toml").exists();
+    let has_package_json = abs_root.join("package.json").exists();
+
+    if !has_cargo && !has_package_json {
+        return Ok(format!(
+            "No Cargo.toml or package.json found in {}.\n\
+             `neurosiphon_diagnostics` supports Rust (`cargo check`) and \
+             TypeScript (`tsc --noEmit`) projects.",
+            abs_root.display()
+        ));
+    }
+
+    if has_cargo {
+        let output = Command::new("cargo")
+            .args(["check", "--message-format=json", "--quiet"])
+            .current_dir(&abs_root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .context("Failed to run `cargo check` — is Rust installed?")?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        diagnostics_parse_cargo(&stdout, &abs_root)
+    } else {
+        let output = Command::new("npx")
+            .args(["tsc", "--noEmit", "--pretty", "false"])
+            .current_dir(&abs_root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .context("Failed to run `npx tsc` — is TypeScript installed?")?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        diagnostics_parse_tsc(&stdout, &stderr)
+    }
+}
+
+fn diagnostics_parse_cargo(cargo_output: &str, repo_root: &Path) -> Result<String> {
+    use serde_json::Value;
+
+    const MAX_ERRORS: usize = 20;
+    const MAX_WARNINGS: usize = 10;
+
+    let mut errors: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    for line in cargo_output.lines() {
+        let line = line.trim();
+        if line.is_empty() || !line.starts_with('{') {
+            continue;
+        }
+        let Ok(json) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if json.get("reason").and_then(|r| r.as_str()) != Some("compiler-message") {
+            continue;
+        }
+        let Some(msg) = json.get("message") else {
+            continue;
+        };
+        let level = msg.get("level").and_then(|l| l.as_str()).unwrap_or("unknown");
+        if level != "error" && level != "warning" {
+            continue;
+        }
+
+        let message_text = msg
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("(no message)");
+        let code_str = msg
+            .get("code")
+            .and_then(|c| c.get("code"))
+            .and_then(|c| c.as_str())
+            .map(|c| format!("[{c}] "))
+            .unwrap_or_default();
+
+        let spans = msg.get("spans").and_then(|s| s.as_array());
+        let mut location = String::new();
+        let mut context_block = String::new();
+
+        if let Some(spans_arr) = spans {
+            if let Some(span) = spans_arr.first() {
+                let file = span.get("file_name").and_then(|f| f.as_str()).unwrap_or("?");
+                let line_start = span
+                    .get("line_start")
+                    .and_then(|l| l.as_u64())
+                    .unwrap_or(0);
+                let col = span
+                    .get("column_start")
+                    .and_then(|c| c.as_u64())
+                    .unwrap_or(0);
+                location = format!("{file}:{line_start}:{col}");
+
+                if let Ok(contents) = std::fs::read_to_string(repo_root.join(file)) {
+                    let text_lines: Vec<&str> = contents.lines().collect();
+                    let target_0 = (line_start as usize).saturating_sub(1);
+                    context_block = extract_context_lines(&text_lines, target_0, 1);
+                }
+            }
+        }
+
+        let mut entry = format!("**{level}**: {code_str}{message_text}\n  → {location}");
+        if !context_block.is_empty() {
+            entry.push_str(&format!("\n```\n{context_block}\n```"));
+        }
+
+        if level == "error" {
+            errors.push(entry);
+        } else {
+            warnings.push(entry);
+        }
+    }
+
+    if errors.is_empty() && warnings.is_empty() {
+        return Ok("Project compiles cleanly — no errors or warnings.\n".to_string());
+    }
+
+    let mut out = String::new();
+
+    if !errors.is_empty() {
+        out.push_str(&format!(
+            "## Errors ({} total, showing up to {MAX_ERRORS})\n\n",
+            errors.len()
+        ));
+        for (i, e) in errors.iter().enumerate().take(MAX_ERRORS) {
+            out.push_str(&format!("### Error {}\n{e}\n\n", i + 1));
+        }
+        if errors.len() > MAX_ERRORS {
+            out.push_str(&format!(
+                "*... {} more errors not shown*\n\n",
+                errors.len() - MAX_ERRORS
+            ));
+        }
+    }
+
+    if !warnings.is_empty() {
+        out.push_str(&format!(
+            "## Warnings ({} total, showing up to {MAX_WARNINGS})\n\n",
+            warnings.len()
+        ));
+        for w in warnings.iter().take(MAX_WARNINGS) {
+            out.push_str(&format!("{w}\n\n"));
+        }
+        if warnings.len() > MAX_WARNINGS {
+            out.push_str(&format!(
+                "*... {} more warnings not shown*\n",
+                warnings.len() - MAX_WARNINGS
+            ));
+        }
+    }
+
+    Ok(out)
+}
+
+fn diagnostics_parse_tsc(stdout: &str, stderr: &str) -> Result<String> {
+    let combined = if stdout.trim().is_empty() { stderr } else { stdout };
+    if combined.trim().is_empty() {
+        return Ok("No TypeScript errors found — project compiles cleanly.\n".to_string());
+    }
+
+    let mut out = String::from("## TypeScript Diagnostics\n\n");
+    let mut count = 0usize;
+    const MAX_TSC: usize = 20;
+
+    for line in combined.lines() {
+        if count >= MAX_TSC {
+            break;
+        }
+        let t = line.trim();
+        if t.contains(": error TS") || t.contains(": warning TS") {
+            out.push_str(&format!("- {t}\n"));
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        // Fallback: include raw output (truncated)
+        let snippet = &combined[..combined.len().min(3_000)];
+        out.push_str(snippet);
+    }
+
+    Ok(out)
+}

@@ -4,7 +4,7 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use crate::config::load_config;
-use crate::inspector::{render_skeleton, read_symbol, find_usages};
+use crate::inspector::{render_skeleton, read_symbol, find_usages, repo_map, call_hierarchy, run_diagnostics};
 use crate::mapper::{build_repo_map, build_repo_map_scoped};
 use crate::slicer::{slice_paths_to_xml, slice_to_xml};
 use crate::scanner::{scan_workspace, ScanOptions};
@@ -110,6 +110,42 @@ impl ServerState {
                                 "symbol_name": { "type": "string", "description": "Symbol name to find usages of (e.g. 'process_request', 'ConvertRequest')" }
                             },
                             "required": ["target_dir", "symbol_name"]
+                        }
+                    },
+                    {
+                        "name": "neurosiphon_repo_map",
+                        "description": "Return a compact hierarchical text map of the entire codebase showing file paths and their exported/public symbols only. Designed for LLM consumption — gives a God's-eye overview of what exists and where without reading every file. Output is grouped by directory and capped at ~8 000 chars. Much cheaper than get_context_slice for navigation.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "repoPath": { "type": "string", "description": "Absolute path to the repo root" },
+                                "target_dir": { "type": "string", "description": "Directory to map (relative to repoPath, or absolute). Use '.' for the whole repo." }
+                            },
+                            "required": ["target_dir"]
+                        }
+                    },
+                    {
+                        "name": "neurosiphon_call_hierarchy",
+                        "description": "Analyse the complete call hierarchy for a named symbol. Returns three sections: (1) Definition — file and line where the symbol is declared. (2) Outgoing calls — identifiers called from within the symbol's body. (3) Incoming calls — all callers of this symbol with enclosing function context. Works without compilation via raw AST analysis.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "repoPath": { "type": "string", "description": "Absolute path to the repo root" },
+                                "target_dir": { "type": "string", "description": "Directory to search in (relative to repoPath, or absolute). Use '.' for the whole repo." },
+                                "symbol_name": { "type": "string", "description": "Exact symbol name to analyse (e.g. 'process_request', 'MyStruct')" }
+                            },
+                            "required": ["target_dir", "symbol_name"]
+                        }
+                    },
+                    {
+                        "name": "neurosiphon_diagnostics",
+                        "description": "Run the project's native compiler/type-checker and return a structured error report pinned to source locations with inline code context. Auto-detects project type: Cargo.toml → `cargo check --message-format=json`; package.json → `npx tsc --noEmit`. Errors capped at 20, warnings at 10. Each entry includes a 1-line context window.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "repoPath": { "type": "string", "description": "Absolute path to the project root (must contain Cargo.toml or package.json)" }
+                            },
+                            "required": ["repoPath"]
                         }
                     }
                 ]
@@ -234,6 +270,38 @@ impl ServerState {
                 match find_usages(&target_dir, sym) {
                     Ok(s) => ok(s),
                     Err(e) => err(format!("find_usages failed: {e}")),
+                }
+            }
+            "neurosiphon_repo_map" => {
+                let repo_root = self.repo_root_from_params(&args);
+                let Some(target_str) = args.get("target_dir").and_then(|v| v.as_str()) else {
+                    return err("Missing target_dir".to_string());
+                };
+                let target_dir = resolve_path(&repo_root, target_str);
+                match repo_map(&target_dir) {
+                    Ok(s) => ok(s),
+                    Err(e) => err(format!("repo_map failed: {e}")),
+                }
+            }
+            "neurosiphon_call_hierarchy" => {
+                let repo_root = self.repo_root_from_params(&args);
+                let Some(target_str) = args.get("target_dir").and_then(|v| v.as_str()) else {
+                    return err("Missing target_dir".to_string());
+                };
+                let Some(sym) = args.get("symbol_name").and_then(|v| v.as_str()) else {
+                    return err("Missing symbol_name".to_string());
+                };
+                let target_dir = resolve_path(&repo_root, target_str);
+                match call_hierarchy(&target_dir, sym) {
+                    Ok(s) => ok(s),
+                    Err(e) => err(format!("call_hierarchy failed: {e}")),
+                }
+            }
+            "neurosiphon_diagnostics" => {
+                let repo_root = self.repo_root_from_params(&args);
+                match run_diagnostics(&repo_root) {
+                    Ok(s) => ok(s),
+                    Err(e) => err(format!("diagnostics failed: {e}")),
                 }
             }
             _ => err(format!("Tool not found: {name}")),
