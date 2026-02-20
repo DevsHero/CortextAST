@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
 // DEFAULT_MAX_CHARS in server.rs — keep in sync.
-const EXPECTED_DEFAULT_MAX_CHARS: usize = 60_000;
+const EXPECTED_DEFAULT_MAX_CHARS: usize = 8_000;
 
 #[test]
 fn mcp_stdio_smoke() {

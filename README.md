@@ -205,7 +205,7 @@ To maximise CortexAST's effectiveness, add the rules below to your AI assistant'
 - ⏳ Verify a refactor → `cortex_chronos(action: compare_checkpoint)` AFTER editing (NEVER use git diff for this). Tip: `tag_b='__live__'` compares against the current filesystem state.
 - ⏳ Clean up QC checkpoints → `cortex_chronos(action: delete_checkpoint, namespace='qa-run-1')` — omit `symbol_name`/`semantic_tag` to purge the entire namespace.
 - 🚨 Check for errors → `run_diagnostics` immediately after any code edit.
-- 🔒 `max_chars` (default **60000**, no hard server-side cap) — all output is force-inline-truncated; it is **never written to disk**. Lower to e.g. `7500` if your MCP client has a tight inline-display limit.
+- 🔒 `max_chars` (default **8000**) — the server truncates at this limit. VS Code Copilot spills responses larger than ~8 KB to workspace storage, so the 8000 default keeps output inline. Increase only if your client handles larger inline responses.
 ```
 
 ### Cursor

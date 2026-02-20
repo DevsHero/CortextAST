@@ -18,15 +18,61 @@ use rayon::prelude::*;
 #[derive(Default)]
 pub struct ServerState {
     repo_root: Option<PathBuf>,
+    /// Root captured from the MCP `initialize` request (rootUri / workspaceFolders).
+    /// Populated once and used as a fallback so tools work without explicit `repoPath`.
+    init_root: Option<PathBuf>,
+}
+
+/// Attempt to find the git repository root from the current working directory.
+/// Spawns `git rev-parse --show-toplevel` — fast, reliable, zero dependencies.
+fn detect_git_root() -> Option<PathBuf> {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| PathBuf::from(s.trim()))
 }
 
 impl ServerState {
+    /// Called once when the MCP `initialize` message is received.
+    /// Extracts the workspace root from standard MCP/LSP fields so subsequent
+    /// tool calls without `repoPath` resolve correctly inside VS Code.
+    fn capture_init_root(&mut self, params: &serde_json::Value) {
+        // VS Code Copilot MCP sends workspaceFolders or rootUri in initialize params.
+        let root = params
+            .get("workspaceFolders")
+            .and_then(|f| f.as_array())
+            .and_then(|a| a.first())
+            .and_then(|f| f.get("uri").or_else(|| f.get("path")))
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                params
+                    .get("rootUri")
+                    .or_else(|| params.get("rootPath"))
+                    .and_then(|v| v.as_str())
+            })
+            .map(|s| s.trim_start_matches("file://").trim_end_matches('/').to_string())
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
+        if root.is_some() {
+            self.init_root = root;
+        }
+    }
+
     fn repo_root_from_params(&mut self, params: &serde_json::Value) -> PathBuf {
         let repo_root = params
             .get("repoPath")
             .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
             .map(PathBuf::from)
+            // Cached from a prior call in this session
             .or_else(|| self.repo_root.clone())
+            // Captured from MCP initialize params
+            .or_else(|| self.init_root.clone())
+            // Git root detection — reliable when VS Code spawns with HOME as cwd
+            .or_else(|| detect_git_root())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
         self.repo_root = Some(repo_root.clone());
@@ -48,13 +94,13 @@ impl ServerState {
                                 "action": {
                                     "type": "string",
                                     "enum": ["map_overview", "deep_slice"],
-                                    "description": "Required — chooses the exploration mode.\n• `map_overview` — Returns a condensed bird's-eye map of all files and public symbols in a directory. Requires `target_dir` (use '.' for whole repo). Optional: `search_filter` (case-insensitive substring/OR filter on paths), `max_chars` (default 60000), `ignore_gitignore`. Returns minimal tokens even for large repos — run this first on any unfamiliar codebase.\n• `deep_slice` — Returns a token-budget-aware XML slice of a file or directory with function bodies pruned to skeletons. Requires `target` (relative path to file or dir). Optional: `budget_tokens` (default 32000), `query` (semantic search to rank most-relevant files first), `query_limit` (max files returned in query mode). When `query` is set, only the most relevant files are included — use this to minimize token waste on large directories."
+                                    "description": "Required — chooses the exploration mode.\n• `map_overview` — Returns a condensed bird's-eye map of all files and public symbols in a directory. Requires `target_dir` (use '.' for whole repo). Optional: `search_filter` (case-insensitive substring/OR filter on paths), `max_chars` (default 8000, safe for VS Code Copilot inline display), `ignore_gitignore`. Returns minimal tokens even for large repos — run this first on any unfamiliar codebase.\n• `deep_slice` — Returns a token-budget-aware XML slice of a file or directory with function bodies pruned to skeletons. Requires `target` (relative path to file or dir). Optional: `budget_tokens` (default 32000), `query` (semantic search to rank most-relevant files first), `query_limit` (max files returned in query mode). When `query` is set, only the most relevant files are included — use this to minimize token waste on large directories."
                                 },
                                 "repoPath": { "type": "string", "description": "Optional absolute path to the repo root (defaults to current working directory)." },
 
                                 "target_dir": { "type": "string", "description": "(map_overview) Directory to map (use '.')" },
                                 "search_filter": { "type": "string", "description": "(map_overview) Optional: case-insensitive substring filter (NOT regex). Supports OR via `foo|bar|baz`." },
-                                "max_chars": { "type": "integer", "description": "Optional: Maximum output characters. Default is 60000 (force-inline-truncated, never spills to disk). No hard server-side cap." },
+                                "max_chars": { "type": "integer", "description": "Optional: Maximum output characters. Default 8000 — calibrated to stay below VS Code Copilot's ~8 KB inline-display threshold. Raise to up to ~30000 if your client handles large inline output; note VS Code Copilot will spill responses >~8 KB to workspace storage." },
                                 "ignore_gitignore": { "type": "boolean", "description": "(map_overview) Optional: include git-ignored files." },
 
                                 "target": { "type": "string", "description": "(deep_slice) Relative path within repo to slice (file or dir). Required for deep_slice." },
@@ -81,7 +127,7 @@ impl ServerState {
                                 "symbol_name": { "type": "string", "description": "Target symbol. Avoid regex or plural words (e.g. use 'auth', 'convert_request')." },
                                 "target_dir": { "type": "string", "description": "Scope directory (use '.' for entire repo). Required for find_usages/blast_radius; optional for propagation_checklist (defaults '.')." },
                                 "ignore_gitignore": { "type": "boolean", "description": "(propagation_checklist) Include generated / git-ignored stubs." },
-                                "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 60000 (inline-safe), no hard server-side cap." },
+                                "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 8000 (safe for VS Code Copilot inline). Raise if your client handles larger inline output." },
 
                                 "aliases": {
                                     "type": "array",
@@ -112,7 +158,7 @@ impl ServerState {
                                 },
                                 "repoPath": { "type": "string", "description": "Optional absolute path to the repo root." },
                                 "namespace": { "type": "string", "description": "Optional grouping bucket for checkpoints (default: 'default'). Use a distinct name like 'qa-run-1' per test session. To clean up all QC checkpoints at once: action='delete_checkpoint' with only namespace='qa-run-1' (omit symbol_name and semantic_tag) to purge the entire namespace directory." },
-                                "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 60000 (inline-safe), no hard server-side cap." },
+                                "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 8000 (safe for VS Code Copilot inline). Raise if your client handles larger inline output." },
 
                                 "path": { "type": "string", "description": "(save_checkpoint/compare_checkpoint) Source file path. Optional for compare (disambiguation)." },
                                 "symbol_name": { "type": "string", "description": "(save_checkpoint/compare_checkpoint) Target symbol." },
@@ -131,7 +177,7 @@ impl ServerState {
                             "type": "object",
                             "properties": {
                                 "repoPath": { "type": "string" },
-                                "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 60000 (inline-safe), no hard server-side cap." }
+                                "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 8000 (safe for VS Code Copilot inline)." }
                             },
                             "required": ["repoPath"]
                         }
@@ -874,7 +920,13 @@ pub fn run_stdio_server() -> Result<()> {
         let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
         let reply = match method {
-            "initialize" => json!({
+            "initialize" => {
+                // Capture workspace root from VS Code's initialize params so subsequent
+                // tool calls without repoPath resolve to the correct directory.
+                if let Some(p) = msg.get("params") {
+                    state.capture_init_root(p);
+                }
+                json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
@@ -882,7 +934,7 @@ pub fn run_stdio_server() -> Result<()> {
                     "capabilities": { "tools": { "listChanged": true } },
                     "serverInfo": { "name": "cortexast", "version": "0.2.0" }
                 }
-            }),
+            })}
             "ping" => json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -918,7 +970,7 @@ pub fn run_stdio_server() -> Result<()> {
     Ok(())
 }
 
-const DEFAULT_MAX_CHARS: usize = 60_000;
+const DEFAULT_MAX_CHARS: usize = 8_000;
 
 fn negotiated_max_chars(args: &serde_json::Value) -> usize {
     args.get("max_chars")

@@ -12,10 +12,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `cortex_symbol_analyzer(action=find_implementations)` to locate Rust/TypeScript implementors of a trait/interface.
 - `cortex_code_explorer(action=deep_slice)` supports `skeleton_only: true` to enforce structural pruning regardless of repo config.
 - **Chronos namespaces:** all Chronos actions accept an optional `namespace` parameter (default: `"default"`). Checkpoints are stored under `checkpoints/<namespace>/`, allowing isolation by session/job. `delete_checkpoint` with only `namespace` purges the entire namespace directory in one call — solves stale QC checkpoint accumulation.
+- **`detect_git_root()`** helper: when no `repoPath` is provided, the server now runs `git rev-parse --show-toplevel` to locate the repo root. Falls back to workspace root captured from the MCP `initialize` params, then `current_dir`.
 
 ### Changed
-- Output handling: megatool responses are hard-truncated inline by `force_inline_truncate` at `max_chars` (default **60 000**, no server-side cap). Output is **never written to disk** — the `✂️ [TRUNCATED: n/total]` marker makes partial output explicit. Lower `max_chars` to e.g. `7500` when your client has a tight inline-display limit.
-- `cortex_symbol_analyzer(action=read_source)` supports `skeleton_only: true` to return structural signatures only (token-saving mode).
+- `repo_root_from_params` fallback chain: `repoPath param → last-used cache → init_root (from MCP initialize) → git rev-parse → cwd`. Fixes regression where VS Code spawned the MCP server with `$HOME` as cwd, causing all tools to target the wrong directory.
+- Output truncation: `DEFAULT_MAX_CHARS` corrected to **8 000** (calibrated to stay below VS Code Copilot's ~8 KB inline-display spill threshold). The previous `60 000` default caused all large outputs to be written to workspace storage.
+- MCP `initialize` handler now calls `capture_init_root()` to extract `workspaceFolders` / `rootUri` / `rootPath` from the VS Code initialize params.
 
 ### Fixed
 - Chronos checkpoint path matching is normalized to repo-relative keys (consistent across save/compare/delete), reducing "No checkpoint found" mismatches caused by absolute vs relative path variants.

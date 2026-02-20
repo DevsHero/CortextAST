@@ -59,7 +59,11 @@ Follow this sequence for any non-trivial refactor (especially renames, signature
 7. **Cross‑Sync** → `cortex_symbol_analyzer(action: propagation_checklist)` when touching shared types/contracts
 
 **Output safety (spill prevention):**
-- Output is always force-inline-truncated at `max_chars` (default **60000**, no hard server-side cap) — output is **never written to disk**, always returned inline in the MCP response body. Set `max_chars` to a smaller value (e.g. `7500`) when your MCP client has a tight inline-display limit.
+- Output is truncated server-side at `max_chars` (default **8000**). VS Code Copilot writes responses larger than ~8 KB to workspace storage — the 8000 default is calibrated to stay below that threshold. Set `max_chars` explicitly (e.g. `3000`) for large-scope queries; increase only if your client handles larger inline output.
+
+**`repoPath` best practice:**
+- Always pass `repoPath` explicitly on every tool call (e.g. `repoPath="/Users/me/project"`). Without it, the server tries `git rev-parse --show-toplevel` → `initialize` workspace root → `cwd`, but VS Code may spawn the MCP server with `$HOME` as cwd, causing all path resolution to fail silently.
+- Use the absolute workspace root path, not a subdirectory.
 
 **Propagation best practice (Hybrid Omni‑Match):**
 - `propagation_checklist` automatically matches common casing variants of `symbol_name` (PascalCase / camelCase / snake_case).
@@ -119,8 +123,16 @@ Strict mode (default):
 - In strict mode with an explicit schema, metadata keys like `_title` / `_url` are suppressed.
 
 Confidence safety (mandatory):
-- If `confidence == 0.0` and you see `placeholder_page` warning, treat it as **unrendered / JS-only placeholder content** (e.g. crates.io, npm).
-  Do NOT trust extracted fields; escalate to browser rendering (CDP) or HITL auth tools.
+- `confidence == 0.0` + `placeholder_page` warning fires **only when ALL of the following are true**:
+  1. `word_count < placeholder_word_threshold` (default 10) **or** content has ≤ 1 non-empty line
+  2. ≥ `placeholder_empty_ratio` (default 0.9) of schema fields are null/empty
+  3. **No single field** contains real extracted data
+  - When fired: the page is an unrendered JS-only shell (e.g. crates.io, npm). Do NOT trust any fields.
+    Escalate to CDP/browser rendering or HITL auth tools.
+  - When NOT fired: if any field has real data (e.g. `structs: [32 items]` but `modules: []`) the
+    `confidence` stays above 0.0 — partial extraction is valid. Do NOT assume the page was broken.
+- Tuning: pass `placeholder_word_threshold` (integer) and `placeholder_empty_ratio` (0–1 float) to
+  `extract_structured` / `fetch_then_extract` when the defaults cause false positives or false negatives.
 
 Input constraint:
 - Don’t point structured extraction at raw `.md` / `.json` / `.txt` unless that’s intentionally your source.
@@ -131,6 +143,8 @@ Input constraint:
   holds the information you need
 - Do NOT assume a single `web_fetch` of the index page is sufficient for large doc sites
 - Typical workflow: `web_crawl` to discover links → `web_fetch` on the specific sub-page
+- Output is capped at `max_chars` (default 10 000) to prevent workspace storage spill.
+  Pass a higher value (e.g. `max_chars: 30000`) when crawling many pages.
 
 ### 7. `hitl_web_fetch` — Last Resort Only
 - Use ONLY when both direct fetch AND proxy rotation have failed
