@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::config::load_config;
 use crate::chronos::{checkpoint_symbol, compare_symbol, list_checkpoints};
-use crate::inspector::{extract_symbols_from_source, render_skeleton, read_symbol, find_usages, repo_map_with_filter, call_hierarchy, run_diagnostics, propagation_checklist};
+use crate::inspector::{extract_symbols_from_source, render_skeleton, read_symbol_with_options, find_usages, repo_map_with_filter, call_hierarchy, run_diagnostics, propagation_checklist};
 use crate::slicer::{slice_paths_to_xml, slice_to_xml};
 use crate::scanner::{scan_workspace, ScanOptions};
 use crate::vector_store::{CodebaseIndex, IndexJob};
@@ -85,6 +85,7 @@ impl ServerState {
 
                                 "path": { "type": "string", "description": "(read_source) Source file containing the symbol. Required for read_source." },
                                 "symbol_names": { "type": "array", "items": { "type": "string" }, "description": "(read_source) Optional batch mode. If provided, extracts all symbols from `path` and ignores `symbol_name`." },
+                                "skeleton_only": { "type": "boolean", "description": "(read_source only) If true, strips the internal bodies of functions/impls and returns only the structural signatures. Drastically saves tokens when you only need to see the interface/API of a symbol." },
 
                                 "changed_path": { "type": "string", "description": "(propagation_checklist) Optional legacy mode: path to a changed contract file (e.g. .proto). If provided, overrides symbol-based mode." },
                                 "max_symbols": { "type": "integer", "description": "(propagation_checklist legacy) Optional max extracted symbols (default 20)." }
@@ -252,13 +253,14 @@ Please correct your target_dir (or pass repoPath explicitly).",
                             );
                         };
                         let abs = resolve_path(&repo_root, p);
+                        let skeleton_only = args.get("skeleton_only").and_then(|v| v.as_bool()).unwrap_or(false);
 
                         // Multi-symbol batching: symbol_names: ["A", "B", ...]
                         if let Some(arr) = args.get("symbol_names").and_then(|v| v.as_array()) {
                             let mut out_parts: Vec<String> = Vec::new();
                             for v in arr {
                                 let Some(sym) = v.as_str().filter(|s| !s.trim().is_empty()) else { continue };
-                                match read_symbol(&abs, sym) {
+                                match read_symbol_with_options(&abs, sym, skeleton_only) {
                                     Ok(s) => out_parts.push(s),
                                     Err(e) => out_parts.push(format!("// ERROR reading `{sym}`: {e}")),
                                 }
@@ -280,7 +282,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                                 For batch extraction of multiple symbols from the same file, use symbol_names=['A','B'] instead.".to_string()
                             );
                         };
-                        match read_symbol(&abs, sym) {
+                        match read_symbol_with_options(&abs, sym, skeleton_only) {
                             Ok(s) => ok(s),
                             Err(e) => err(format!("read_symbol failed: {e}")),
                         }

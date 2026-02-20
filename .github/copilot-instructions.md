@@ -23,6 +23,24 @@
 | Delete old snapshots (housekeeping) | `cortex_chronos` | `delete_checkpoint` | `symbol_name` and/or `semantic_tag` *(optional: `path`)* |
 | Compile/lint diagnostics | `run_diagnostics` | *(none)* | `repoPath` |
 
+## The Ultimate CortexAST Refactoring SOP
+
+Whenever you are asked to perform a non-trivial refactor or update a core feature, you MUST generate and print this Markdown checklist into the chat **before writing any code**, and check the boxes as you proceed:
+
+### 🧠 Refactoring Orchestration Plan
+- [ ] **Phase 1: Recon & Blast Radius**
+  - [ ] Use `map_overview` to understand the domain.
+  - [ ] Use `blast_radius` (or `find_usages`) on the target symbol.
+- [ ] **Phase 2: Snapshot**
+  - [ ] Use `save_checkpoint` on the target files/symbols.
+- [ ] **Phase 3: Execution**
+  - [ ] Read minimal context using `read_source` (`skeleton_only: true` if large).
+  - [ ] Write the code edits.
+- [ ] **Phase 4: Verification & Sync**
+  - [ ] Use `run_diagnostics` to catch compiler errors.
+  - [ ] Use `compare_checkpoint` to verify structural intent.
+  - [ ] Use `propagation_checklist` to ensure TS/Python/Proto boundaries are updated.
+
 **The Autonomous Refactoring Flow (Rails)**
 
 Follow this sequence for any non-trivial refactor (especially renames, signature changes, or cross-module work):

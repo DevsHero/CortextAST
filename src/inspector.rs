@@ -1841,6 +1841,10 @@ pub fn extract_symbols_from_source(path: &Path, source_text: &str) -> Vec<Symbol
 /// }
 /// ```
 pub fn read_symbol(path: &Path, symbol_name: &str) -> Result<String> {
+    read_symbol_with_options(path, symbol_name, false)
+}
+
+pub fn read_symbol_with_options(path: &Path, symbol_name: &str, skeleton_only: bool) -> Result<String> {
     let abs: PathBuf = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -1939,6 +1943,31 @@ pub fn read_symbol(path: &Path, symbol_name: &str) -> Result<String> {
     let symbol_lines = end_line.saturating_sub(start_line) + 1;
 
     let header = format!("// {kind} `{name}` — {}:L{start_line}-L{end_line}\n", abs.display());
+
+    let body = if skeleton_only {
+        // Reuse the same pruning logic as render_skeleton(), but apply only the
+        // replacements that fall within this symbol's byte range.
+        let mut ranges = driver.body_prune_ranges(&abs, &source_text, source, root, language.clone())?;
+        ranges.retain(|(s, e, _)| {
+            // Keep only ranges that overlap with the extracted symbol region.
+            *e > *start_byte && *s < *end_byte
+        });
+        let adjusted = ranges
+            .into_iter()
+            .map(|(s, e, rep)| {
+                let s2 = s.max(*start_byte);
+                let e2 = e.min(*end_byte);
+                let ss = s2.saturating_sub(*start_byte);
+                let ee = e2.saturating_sub(*start_byte);
+                (ss, ee, rep)
+            })
+            .collect::<Vec<_>>();
+
+        let skeleton = apply_replacements(body, adjusted);
+        clean_skeleton_text(&abs, &skeleton)
+    } else {
+        body.to_string()
+    };
 
     if symbol_lines > MAX_SYMBOL_LINES {
         // Emit only the first MAX_SYMBOL_LINES lines so the MCP payload stays manageable.
