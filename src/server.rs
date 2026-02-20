@@ -50,19 +50,60 @@ fn find_git_root_from_path(start: &std::path::Path) -> Option<PathBuf> {
 /// Returns `true` for "useless" roots that indicate the server started with the
 /// wrong cwd (usually $HOME or filesystem root on any OS).
 fn is_dead_root(p: &std::path::Path) -> bool {
-    // Consider the path a dead root when it has ≤ 1 components after the root
-    // (e.g. "/", "/Users/hero", "C:\Users\hero") — no real project lives there.
-    let comp_count = p.components().count();
-    if comp_count <= 1 {
+    // `parent() == None` is the universal OS-root test across all platforms:
+    //   `/`.parent()    → None  (Unix)
+    //   `C:\`.parent()  → None  (Windows drive root — the old `count <= 1`
+    //                            check missed this because C:\ has 2 components:
+    //                            Prefix("C:") + RootDir)
+    if p.parent().is_none() {
         return true;
     }
-    // Also catch $HOME specifically.
+    // Bare single-component paths (e.g. ".") are also useless.
+    if p.components().count() <= 1 {
+        return true;
+    }
+    // Also catch $HOME specifically — no real project lives directly there.
     if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
         if p == std::path::Path::new(home.trim()) {
             return true;
         }
     }
     false
+}
+
+/// Parse a file URI (or plain path string) into an OS-native `PathBuf`.
+///
+/// Handles the cross-platform quirk that a simple `trim_start_matches("file://")`
+/// gets wrong on Windows:
+///
+/// | URI input                        | Unix result             | Windows result       |
+/// |----------------------------------|-------------------------|----------------------|
+/// | `file:///Users/hero/project`     | `/Users/hero/project`   | (same — harmless)    |
+/// | `file:///C:/Users/hero/project`  | `/C:/Users/hero/proj`   | `C:/Users/hero/proj` |
+/// | plain `/Users/hero/project`      | `/Users/hero/project`   | (same)               |
+///
+/// On Windows, RFC 8089 file URIs encode the drive as `file:///C:/...`; after
+/// stripping `file://` the leftover `/C:/...` must have its leading slash
+/// removed to produce a valid Windows path.  We detect this with a byte-level
+/// check (`bytes[1]` is ASCII alpha + `bytes[2]` == `:`), which cannot fire
+/// for a legitimate Unix absolute path segment (e.g. `/Users/...`).
+fn extract_path_from_uri(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://").unwrap_or(uri);
+
+    // Windows drive-root artifact: strip the spurious leading `/` in `/C:/...`
+    // so the result is a valid Windows path `C:/...`.
+    let rest = if rest.starts_with('/')
+        && rest.len() >= 3
+        && rest.as_bytes()[1].is_ascii_alphabetic()
+        && rest.as_bytes()[2] == b':'
+    {
+        &rest[1..]
+    } else {
+        rest
+    };
+
+    let s = rest.trim_end_matches('/');
+    if s.is_empty() { None } else { Some(PathBuf::from(s)) }
 }
 
 /// Attempt to find the git repository root from the current working directory.
@@ -87,7 +128,7 @@ impl ServerState {
     fn capture_init_root(&mut self, params: &serde_json::Value) {
         // Priority: workspaceFolders[0].uri → rootUri → rootPath
         // All three are standard MCP/LSP fields; strip file:// prefix and trailing slash.
-        let root = params
+        let raw_uri = params
             .get("workspaceFolders")
             .and_then(|f| f.as_array())
             .and_then(|a| a.first())
@@ -98,10 +139,11 @@ impl ServerState {
                     .get("rootUri")
                     .or_else(|| params.get("rootPath"))
                     .and_then(|v| v.as_str())
-            })
-            .map(|s| s.trim_start_matches("file://").trim_end_matches('/').to_string())
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from);
+            });
+
+        // Use the cross-platform URI parser so Windows `file:///C:/...` URIs
+        // are decoded correctly (simple trim_start_matches leaves `/C:/...`).
+        let root = raw_uri.and_then(extract_path_from_uri);
 
         // The protocol root is authoritative — overwrite any earlier bootstrap
         // value (env vars / --root) so the editor's own answer always wins.
