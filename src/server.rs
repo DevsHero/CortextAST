@@ -48,13 +48,13 @@ impl ServerState {
                                 "action": {
                                     "type": "string",
                                     "enum": ["map_overview", "deep_slice"],
-                                    "description": "Required — chooses the exploration mode.\n• `map_overview` — Returns a condensed bird's-eye map of all files and public symbols in a directory. Requires `target_dir` (use '.' for whole repo). Optional: `search_filter` (case-insensitive substring/OR filter on paths), `max_chars` (default 15000, max 30000), `ignore_gitignore`. Returns minimal tokens even for large repos — run this first on any unfamiliar codebase.\n• `deep_slice` — Returns a token-budget-aware XML slice of a file or directory with function bodies pruned to skeletons. Requires `target` (relative path to file or dir). Optional: `budget_tokens` (default 32000), `query` (semantic search to rank most-relevant files first), `query_limit` (max files returned in query mode). When `query` is set, only the most relevant files are included — use this to minimize token waste on large directories."
+                                    "description": "Required — chooses the exploration mode.\n• `map_overview` — Returns a condensed bird's-eye map of all files and public symbols in a directory. Requires `target_dir` (use '.' for whole repo). Optional: `search_filter` (case-insensitive substring/OR filter on paths), `max_chars` (default 7500, max 30000), `ignore_gitignore`. Returns minimal tokens even for large repos — run this first on any unfamiliar codebase.\n• `deep_slice` — Returns a token-budget-aware XML slice of a file or directory with function bodies pruned to skeletons. Requires `target` (relative path to file or dir). Optional: `budget_tokens` (default 32000), `query` (semantic search to rank most-relevant files first), `query_limit` (max files returned in query mode). When `query` is set, only the most relevant files are included — use this to minimize token waste on large directories."
                                 },
                                 "repoPath": { "type": "string", "description": "Optional absolute path to the repo root (defaults to current working directory)." },
 
                                 "target_dir": { "type": "string", "description": "(map_overview) Directory to map (use '.')" },
                                 "search_filter": { "type": "string", "description": "(map_overview) Optional: case-insensitive substring filter (NOT regex). Supports OR via `foo|bar|baz`." },
-                                "max_chars": { "type": "integer", "description": "Optional: Maximum output characters. Default is 15000. Set this to control context size, but max allowed is 30000 to prevent IDE interception." },
+                                "max_chars": { "type": "integer", "description": "Optional: Maximum output characters. Default is 7500 (safe for inline display in all MCP clients). Increase up to 30000 only when you explicitly need large output and accept possible client-side file spill." },
                                 "ignore_gitignore": { "type": "boolean", "description": "(map_overview) Optional: include git-ignored files." },
 
                                 "target": { "type": "string", "description": "(deep_slice) Relative path within repo to slice (file or dir). Required for deep_slice." },
@@ -81,7 +81,7 @@ impl ServerState {
                                 "symbol_name": { "type": "string", "description": "Target symbol. Avoid regex or plural words (e.g. use 'auth', 'convert_request')." },
                                 "target_dir": { "type": "string", "description": "Scope directory (use '.' for entire repo). Required for find_usages/blast_radius; optional for propagation_checklist (defaults '.')." },
                                 "ignore_gitignore": { "type": "boolean", "description": "(propagation_checklist) Include generated / git-ignored stubs." },
-                                "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 15000, max 30000." },
+                                "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 7500 (inline-safe), max 30000." },
 
                                 "aliases": {
                                     "type": "array",
@@ -111,7 +111,7 @@ impl ServerState {
                                     "description": "Required — selects the Chronos operation.\n• `save_checkpoint` — Saves an AST-level snapshot of a named symbol under a semantic tag. Call this BEFORE any non-trivial refactor or edit. Requires `path` (source file path), `symbol_name`, and `semantic_tag` (or `tag` alias — use descriptive values like 'pre-refactor', 'baseline', 'v1-before-split').\n• `list_checkpoints` — Lists all saved snapshots grouped by semantic tag. Call this before a comparison to know which tags exist. Only `repoPath` is relevant (optional).\n• `compare_checkpoint` — Structurally compares two named snapshots of a symbol, ignoring whitespace and line-number differences. Returns an AST-level semantic diff. Call this AFTER editing to verify correctness. Requires `symbol_name`, `tag_a`, `tag_b`; `path` is optional as a disambiguation hint when the same tag+symbol exists in multiple files.\n• `delete_checkpoint` — Deletes checkpoint files from the local checkpoint store. Provide at least one filter (`symbol_name` and/or `semantic_tag`/`tag`). Optional: `path` to disambiguate when the same symbol+tag exists in multiple files."
                                 },
                                 "repoPath": { "type": "string", "description": "Optional absolute path to the repo root." },
-                                "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 15000, max 30000." },
+                                "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 7500 (inline-safe), max 30000." },
 
                                 "path": { "type": "string", "description": "(save_checkpoint/compare_checkpoint) Source file path. Optional for compare (disambiguation)." },
                                 "symbol_name": { "type": "string", "description": "(save_checkpoint/compare_checkpoint) Target symbol." },
@@ -130,7 +130,7 @@ impl ServerState {
                             "type": "object",
                             "properties": {
                                 "repoPath": { "type": "string" },
-                                "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 15000, max 30000." }
+                                "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 7500 (inline-safe), max 30000." }
                             },
                             "required": ["repoPath"]
                         }
@@ -909,7 +909,7 @@ pub fn run_stdio_server() -> Result<()> {
     Ok(())
 }
 
-const DEFAULT_MAX_CHARS: usize = 15_000;
+const DEFAULT_MAX_CHARS: usize = 7_500;
 const MAX_MAX_CHARS: usize = 30_000;
 
 fn negotiated_max_chars(args: &serde_json::Value) -> usize {

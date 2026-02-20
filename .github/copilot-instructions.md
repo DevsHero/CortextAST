@@ -59,7 +59,7 @@ Follow this sequence for any non-trivial refactor (especially renames, signature
 7. **Cross‑Sync** → `cortex_symbol_analyzer(action: propagation_checklist)` when touching shared types/contracts
 
 **Output safety (spill prevention):**
-- If your MCP client tends to offload large tool outputs into workspace storage, explicitly set `max_chars` (default 15000, max 30000) on megatool calls.
+- Output is automatically truncated at `max_chars` (default **7500**, max 30000) — calibrated to stay below VS Code Copilot's ~8 KB inline-display threshold. Set `max_chars` explicitly only when you need a larger slice and accept possible file spill.
 
 **Propagation best practice (Hybrid Omni‑Match):**
 - `propagation_checklist` automatically matches common casing variants of `symbol_name` (PascalCase / camelCase / snake_case).
@@ -95,6 +95,8 @@ the same efficient, hallucination-resistant research process.
   ```
 - This strips 100 % of nav/footer/boilerplate and keeps only query-relevant paragraphs
 - Token savings are typically 60–80 % compared to raw text output
+- If you see `clean_json_truncated` in warnings, increase `max_chars` (the tool clips large pages to prevent output spilling).
+- Note: semantic shaving intentionally bypasses when `word_count < 200` (short pages are returned whole).
 
 ### 4. Rotate Proxy on First Block Signal (mandatory)
 - If `web_fetch` or `web_search` returns **403 / 429 / rate-limit / IP-block**:
@@ -103,12 +105,26 @@ the same efficient, hallucination-resistant research process.
 - Do NOT retry the same call without rotating first; do NOT escalate to `hitl_web_fetch`
   until proxy rotation has also failed
 
-### 5. `extract_fields` Constraint — Structured HTML Only
-- Use `extract_fields` ONLY on structured HTML pages: official docs, MDN-style pages,
-  product pages, news articles
-- Do NOT use on raw `.md`, `.json`, `.txt`, or `.rst` files — fields will return `null`
-  and confidence will be low
-- For raw Markdown sources, use `web_fetch` with `output_format: "clean_json"` instead
+### 5. Structured Extraction — `fetch_then_extract` / `extract_fields`
+
+Use schema-driven extraction when you need a stable JSON shape for downstream agent logic.
+
+- Prefer `fetch_then_extract` for **one-shot** workflows (fetch + extract in the same tool call).
+- Use `extract_fields` when you already fetched/scraped content (or when the agent framework routes through it).
+
+Strict mode (default):
+- `strict: true` enforces schema shape (no drift):
+  - missing array-like fields → `[]`
+  - missing scalar fields → `null`
+- In strict mode with an explicit schema, metadata keys like `_title` / `_url` are suppressed.
+
+Confidence safety (mandatory):
+- If `confidence == 0.0` and you see `placeholder_page` warning, treat it as **unrendered / JS-only placeholder content** (e.g. crates.io, npm).
+  Do NOT trust extracted fields; escalate to browser rendering (CDP) or HITL auth tools.
+
+Input constraint:
+- Don’t point structured extraction at raw `.md` / `.json` / `.txt` unless that’s intentionally your source.
+  For docs pages, prefer `web_fetch(output_format="clean_json")` then extract.
 
 ### 6. `web_crawl` — Use When Sub-Page Discovery Is Needed
 - Use `web_crawl` when you know a doc site's index URL but do not know which sub-page
@@ -136,6 +152,9 @@ web_search_json ──► enough content? ──► use it, STOP
         │ need deeper page
         ▼
 web_fetch (clean_json + strict_relevance + query)
+  │ need schema-stable JSON?
+  ▼
+fetch_then_extract (schema + strict=true)
         │ 403/429/blocked?
         ▼
 proxy_control grab ──► retry web_fetch with use_proxy: true
@@ -154,8 +173,9 @@ hitl_web_fetch  (LAST RESORT)
 | `web_search_json` | Initial research (search + content) | When only raw URLs needed |
 | `web_search` | Raw URL list only | As substitute for `web_search_json` |
 | `web_fetch` | Fetching a specific known URL | As primary research step |
-| `web_fetch` `clean_json` | Documentation / article pages | Short conversational pages (<200 words) |
+| `web_fetch` `clean_json` | Documentation / article pages (token-efficient) | When you need full raw HTML (use `json` + `include_raw_html=true`, but expect large output) |
 | `web_crawl` | Doc site sub-page discovery | Single-page fetches |
-| `extract_fields` | Structured HTML docs | Raw .md / .json / .txt files |
+| `fetch_then_extract` | One-shot fetch + strict schema extraction | When you only need prose; use `web_fetch(clean_json)` instead |
+| `extract_fields` | Strict schema extraction from scraped pages | Raw .md / .json / .txt files (unless intentional) |
 | `proxy_control` | After any 403/429 error | Proactively without a block signal |
 | `hitl_web_fetch` | CAPTCHA / login wall | Any automatable page |

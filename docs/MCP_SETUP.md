@@ -70,7 +70,7 @@ Megatools (preferred):
 ```
 
 Output safety:
-- All tools support `max_chars` (default 15000, max 30000). The server truncates inline and appends a marker to prevent editor-side spill.
+- All tools support `max_chars` (default **7500**, max 30000). The 7500 default is calibrated to stay below VS Code Copilot's inline-display threshold (~8 KB). The server truncates inline and appends a `✂️` marker. Increase only when you need larger context and accept possible editor-side file spill.
 
 ## 4) Optional Repo Config
 

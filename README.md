@@ -204,7 +204,7 @@ To maximise CortexAST's effectiveness, add the rules below to your AI assistant'
 - ⏳ Save a snapshot → `cortex_chronos(action: save_checkpoint)` BEFORE any non-trivial refactor.
 - ⏳ Verify a refactor → `cortex_chronos(action: compare_checkpoint)` AFTER editing (NEVER use git diff for this). Tip: `tag_b='__live__'` compares against the current filesystem state.
 - 🚨 Check for errors → `run_diagnostics` immediately after any code edit.
-- 🔒 Set `max_chars` (default 15000; max 30000) if your client tends to spill large outputs.
+- 🔒 Set `max_chars` (default **7500**; max 30000) to control output size. The 7500 default is calibrated to stay below VS Code Copilot's inline-display threshold (~8 KB). Increase only when you explicitly need more context.
 ```
 
 ### Cursor
