@@ -1915,12 +1915,12 @@ pub fn read_symbol(path: &Path, symbol_name: &str) -> Result<String> {
         let mut rendered = available.into_iter().take(shown).collect::<Vec<_>>();
         if total > MAX_AVAILABLE {
             rendered.push(format!(
-                "... (and {} more symbols not shown. Use 'map_repo' to see all)",
+                "... (and {} more symbols not shown. Use cortex_code_explorer(action=map_overview) to see all)",
                 total - MAX_AVAILABLE
             ));
         }
         return Err(anyhow!(
-            "Symbol `{}` not found in {}.\nAvailable symbols (showing {} of {}):\n{}\n\n💡 **Hint:** If you are sure '{}' exists, it might be in a different file. Use the 'find_usages' or 'map_repo' tool to search the entire workspace.",
+            "Symbol `{}` not found in {}.\nAvailable symbols (showing {} of {}):\n{}\n\n💡 **Hint:** If you are sure '{}' exists, it might be in a different file. Use cortex_symbol_analyzer(action=find_usages) or cortex_code_explorer(action=map_overview) to search the workspace.",
             symbol_name,
             abs.display(),
             shown,
@@ -2893,13 +2893,14 @@ Supported extensions include: rs, ts, tsx, js, jsx, py, go.",
         Disclosure::Deep => {}
         Disclosure::FilesOnly => {
             if kept_source_files > STRICT_SUMMARY_THRESHOLD {
-                push("> ⚠️ LARGE REPO DETECTED (50+ files). Enforcing Summary-First mode. Symbols are hidden to save context. Use 'map_repo' on specific sub-folders or 'find_usages' to dig deeper.\n\n");
+                push("> ⚠️ LARGE REPO DETECTED (50+ files). Enforcing Summary-First mode. Symbols are hidden to save context.\n");
+                push("> Next step: call cortex_code_explorer(action=map_overview) on a smaller sub-folder to reveal symbols, or use cortex_symbol_analyzer(action=find_usages) to jump directly to call sites.\n\n");
             } else {
                 push("> ⚠️ Repo Overview: Showing files only (symbols hidden to save context). Target a specific sub-folder to see symbols.\n\n");
             }
         }
         Disclosure::FoldersOnly => {
-            push("> ⚠️ Massive Directory: Showing folders only. You MUST run map_repo on a specific sub-folder to see files.\n\n");
+            push("> ⚠️ Massive Directory: Showing folders only. You MUST call cortex_code_explorer(action=map_overview) on a specific sub-folder to see files.\n\n");
         }
     }
 

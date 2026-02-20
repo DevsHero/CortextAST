@@ -466,7 +466,18 @@ Please correct your target_dir (or pass repoPath explicitly).",
                         let path = args.get("path").and_then(|v| v.as_str());
                         match compare_symbol(&repo_root, &cfg, sym, tag_a, tag_b, path) {
                             Ok(s) => ok(s),
-                            Err(e) => err(format!("compare_symbol failed: {e}")),
+                            Err(e) => {
+                                let msg = e.to_string();
+                                if msg.contains("No checkpoint found") || msg.contains("No checkpoints found") {
+                                    err(format!(
+                                        "compare_symbol failed: {msg}\n\n\
+Tip: run cortex_chronos(action=list_checkpoints) to see valid tag+symbol combinations, then retry.\n\
+Common cause: you saved a checkpoint for a different symbol or under a different tag."
+                                    ))
+                                } else {
+                                    err(format!("compare_symbol failed: {msg}"))
+                                }
+                            }
                         }
                     }
                     _ => err(format!(
