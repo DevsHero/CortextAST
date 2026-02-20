@@ -68,36 +68,36 @@ jobs:
           # Linux x86_64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: cortextast-linux-x86_64
-            binary: cortextast
+            artifact: cortexast-linux-x86_64
+            binary: cortexast
             use_cross: false
 
           # Linux ARM64 (cross-compiled via cross + Docker)
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: cortextast-linux-aarch64
-            binary: cortextast
+            artifact: cortexast-linux-aarch64
+            binary: cortexast
             use_cross: true
 
           # macOS Intel
           - target: x86_64-apple-darwin
             os: macos-14
-            artifact: cortextast-macos-x86_64
-            binary: cortextast
+            artifact: cortexast-macos-x86_64
+            binary: cortexast
             use_cross: false
 
           # macOS Apple Silicon
           - target: aarch64-apple-darwin
             os: macos-14
-            artifact: cortextast-macos-aarch64
-            binary: cortextast
+            artifact: cortexast-macos-aarch64
+            binary: cortexast
             use_cross: false
 
           # Windows x86_64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            artifact: cortextast-windows-x86_64
-            binary: cortextast.exe
+            artifact: cortexast-windows-x86_64
+            binary: cortexast.exe
             use_cross: false
 
     runs-on: ${{ matrix.os }}
@@ -197,7 +197,7 @@ jobs:
       - name: Download all binaries
         uses: actions/download-artifact@v4
         with:
-          pattern: cortextast-*
+          pattern: cortexast-*
           merge-multiple: true
           path: release/
 
@@ -231,9 +231,9 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: v${{ env.VERSION }}
-          name: "CortextAST v${{ env.VERSION }}"
+          name: "CortexAST v${{ env.VERSION }}"
           body: |
-            ## 🧠 CortextAST v${{ env.VERSION }}
+            ## 🧠 CortexAST v${{ env.VERSION }}
 
             High-performance LLM context optimizer — Pure Rust, Native MCP.
 
@@ -241,11 +241,11 @@ jobs:
 
             | Platform | Binary |
             |---|---|
-            | Linux x86_64 | `cortextast-linux-x86_64` |
-            | Linux ARM64  | `cortextast-linux-aarch64` |
-            | macOS Intel  | `cortextast-macos-x86_64` |
-            | macOS Apple Silicon | `cortextast-macos-aarch64` |
-            | Windows x86_64 | `cortextast-windows-x86_64.exe` |
+            | Linux x86_64 | `cortexast-linux-x86_64` |
+            | Linux ARM64  | `cortexast-linux-aarch64` |
+            | macOS Intel  | `cortexast-macos-x86_64` |
+            | macOS Apple Silicon | `cortexast-macos-aarch64` |
+            | Windows x86_64 | `cortexast-windows-x86_64.exe` |
 
             Verify integrity with `sha256sums.txt`.
 
@@ -253,8 +253,8 @@ jobs:
 
             ```bash
             # macOS / Linux
-            chmod +x cortextast-*
-            ./cortextast-macos-aarch64 --help
+            chmod +x cortexast-*
+            ./cortexast-macos-aarch64 --help
 
             # Add to MCP client (Claude Desktop / Cursor)
             # Set binary path in your mcpServers config
@@ -264,14 +264,14 @@ jobs:
             ${{ steps.changelog.outputs.changelog }}
 
             ---
-            Full docs: https://github.com/DevsHero/CortextAST
+            Full docs: https://github.com/DevsHero/CortexAST
           draft: false
           prerelease: false
           generate_release_notes: true
           files: |
-            release/cortextast-linux-x86_64
-            release/cortextast-linux-aarch64
-            release/cortextast-macos-x86_64
-            release/cortextast-macos-aarch64
-            release/cortextast-windows-x86_64.exe
+            release/cortexast-linux-x86_64
+            release/cortexast-linux-aarch64
+            release/cortexast-macos-x86_64
+            release/cortexast-macos-aarch64
+            release/cortexast-windows-x86_64.exe
             release/sha256sums.txt
