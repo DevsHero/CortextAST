@@ -54,6 +54,34 @@ fn resolve_path(repo_root: &Path, p: &str) -> PathBuf {
     }
 }
 
+fn normalize_checkpoint_path(repo_root: &Path, abs_path: &Path) -> String {
+    // Best-effort canonicalization to reduce mismatch from path variants.
+    let repo_root = repo_root.canonicalize().unwrap_or_else(|_| repo_root.to_path_buf());
+    let abs_path = abs_path.canonicalize().unwrap_or_else(|_| abs_path.to_path_buf());
+
+    let rel = abs_path.strip_prefix(&repo_root).unwrap_or(abs_path.as_path());
+    let mut out = rel.to_string_lossy().replace('\\', "/");
+    if out.starts_with("./") {
+        out = out.trim_start_matches("./").to_string();
+    }
+    out
+}
+
+fn normalize_checkpoint_path_hint(repo_root: &Path, hint: &str) -> String {
+    let abs = resolve_path(repo_root, hint.trim());
+    normalize_checkpoint_path(repo_root, &abs)
+}
+
+fn normalize_record_path(repo_root: &Path, stored_path: &str) -> String {
+    let stored_path = stored_path.trim().replace('\\', "/");
+    let pb = PathBuf::from(&stored_path);
+    if pb.is_absolute() {
+        normalize_checkpoint_path(repo_root, &pb)
+    } else {
+        stored_path.trim_start_matches("./").to_string()
+    }
+}
+
 fn guess_code_fence(path: &str) -> &'static str {
     match Path::new(path)
         .extension()
@@ -95,10 +123,7 @@ pub fn checkpoint_symbol(repo_root: &Path, cfg: &Config, path: &str, symbol_name
     let code = read_symbol(&abs, symbol_name)
         .with_context(|| format!("Failed to extract symbol `{symbol_name}` from {}", abs.display()))?;
 
-    let rel_path = abs
-        .strip_prefix(repo_root)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| abs.to_string_lossy().replace('\\', "/"));
+    let rel_path = normalize_checkpoint_path(repo_root, &abs);
 
     let rec = CheckpointRecord {
         tag: tag.to_string(),
@@ -205,12 +230,7 @@ pub fn delete_checkpoints(
     let path_hint_rel = path_hint
         .map(|p| p.trim())
         .filter(|p| !p.is_empty())
-        .map(|p| {
-            let abs = resolve_path(repo_root, p);
-            abs.strip_prefix(repo_root)
-                .map(|pp| pp.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_else(|_| abs.to_string_lossy().replace('\\', "/"))
-        });
+        .map(|p| normalize_checkpoint_path_hint(repo_root, p));
 
     let mut deleted: usize = 0;
     let mut matched: usize = 0;
@@ -228,7 +248,7 @@ pub fn delete_checkpoints(
             }
         }
         if let Some(ref hint) = path_hint_rel {
-            if rec.path != *hint {
+            if normalize_record_path(repo_root, &rec.path) != *hint {
                 continue;
             }
         }
@@ -300,14 +320,21 @@ pub fn list_checkpoints(repo_root: &Path, cfg: &Config) -> Result<String> {
     Ok(out)
 }
 
-fn find_one<'a>(recs: &'a [CheckpointRecord], symbol: &str, tag: &str, path: Option<&str>) -> Result<&'a CheckpointRecord> {
+fn find_one<'a>(
+    repo_root: &Path,
+    recs: &'a [CheckpointRecord],
+    symbol: &str,
+    tag: &str,
+    path: Option<&str>,
+) -> Result<&'a CheckpointRecord> {
     let mut matches: Vec<&CheckpointRecord> = recs
         .iter()
         .filter(|r| r.symbol == symbol && r.tag == tag)
         .collect();
 
     if let Some(p) = path {
-        matches.retain(|r| r.path == p);
+        let hint = normalize_checkpoint_path_hint(repo_root, p);
+        matches.retain(|r| normalize_record_path(repo_root, &r.path) == hint);
     }
 
     match matches.len() {
@@ -344,8 +371,8 @@ pub fn compare_symbol(
         return Err(anyhow!("Missing required args: symbol_name, tag_a, tag_b"));
     }
 
-    let rec_a = find_one(&recs, symbol_name, tag_a, path)?;
-    let rec_b = find_one(&recs, symbol_name, tag_b, path)?;
+    let rec_a = find_one(repo_root, &recs, symbol_name, tag_a, path)?;
+    let rec_b = find_one(repo_root, &recs, symbol_name, tag_b, path)?;
 
     let fence = guess_code_fence(&rec_a.path);
     let mut out = String::new();
