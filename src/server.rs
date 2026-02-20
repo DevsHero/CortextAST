@@ -48,13 +48,13 @@ impl ServerState {
                                 "action": {
                                     "type": "string",
                                     "enum": ["map_overview", "deep_slice"],
-                                    "description": "Required — chooses the exploration mode.\n• `map_overview` — Returns a condensed bird's-eye map of all files and public symbols in a directory. Requires `target_dir` (use '.' for whole repo). Optional: `search_filter` (case-insensitive substring/OR filter on paths), `max_chars` (default 7500, max 30000), `ignore_gitignore`. Returns minimal tokens even for large repos — run this first on any unfamiliar codebase.\n• `deep_slice` — Returns a token-budget-aware XML slice of a file or directory with function bodies pruned to skeletons. Requires `target` (relative path to file or dir). Optional: `budget_tokens` (default 32000), `query` (semantic search to rank most-relevant files first), `query_limit` (max files returned in query mode). When `query` is set, only the most relevant files are included — use this to minimize token waste on large directories."
+                                    "description": "Required — chooses the exploration mode.\n• `map_overview` — Returns a condensed bird's-eye map of all files and public symbols in a directory. Requires `target_dir` (use '.' for whole repo). Optional: `search_filter` (case-insensitive substring/OR filter on paths), `max_chars` (default 60000), `ignore_gitignore`. Returns minimal tokens even for large repos — run this first on any unfamiliar codebase.\n• `deep_slice` — Returns a token-budget-aware XML slice of a file or directory with function bodies pruned to skeletons. Requires `target` (relative path to file or dir). Optional: `budget_tokens` (default 32000), `query` (semantic search to rank most-relevant files first), `query_limit` (max files returned in query mode). When `query` is set, only the most relevant files are included — use this to minimize token waste on large directories."
                                 },
                                 "repoPath": { "type": "string", "description": "Optional absolute path to the repo root (defaults to current working directory)." },
 
                                 "target_dir": { "type": "string", "description": "(map_overview) Directory to map (use '.')" },
                                 "search_filter": { "type": "string", "description": "(map_overview) Optional: case-insensitive substring filter (NOT regex). Supports OR via `foo|bar|baz`." },
-                                "max_chars": { "type": "integer", "description": "Optional: Maximum output characters. Default is 7500 (safe for inline display in all MCP clients). Increase up to 30000 only when you explicitly need large output and accept possible client-side file spill." },
+                                "max_chars": { "type": "integer", "description": "Optional: Maximum output characters. Default is 60000 (force-inline-truncated, never spills to disk). No hard server-side cap." },
                                 "ignore_gitignore": { "type": "boolean", "description": "(map_overview) Optional: include git-ignored files." },
 
                                 "target": { "type": "string", "description": "(deep_slice) Relative path within repo to slice (file or dir). Required for deep_slice." },
@@ -81,7 +81,7 @@ impl ServerState {
                                 "symbol_name": { "type": "string", "description": "Target symbol. Avoid regex or plural words (e.g. use 'auth', 'convert_request')." },
                                 "target_dir": { "type": "string", "description": "Scope directory (use '.' for entire repo). Required for find_usages/blast_radius; optional for propagation_checklist (defaults '.')." },
                                 "ignore_gitignore": { "type": "boolean", "description": "(propagation_checklist) Include generated / git-ignored stubs." },
-                                "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 7500 (inline-safe), max 30000." },
+                                "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 60000 (inline-safe), no hard server-side cap." },
 
                                 "aliases": {
                                     "type": "array",
@@ -108,10 +108,11 @@ impl ServerState {
                                 "action": {
                                     "type": "string",
                                     "enum": ["save_checkpoint", "list_checkpoints", "compare_checkpoint", "delete_checkpoint"],
-                                    "description": "Required — selects the Chronos operation.\n• `save_checkpoint` — Saves an AST-level snapshot of a named symbol under a semantic tag. Call this BEFORE any non-trivial refactor or edit. Requires `path` (source file path), `symbol_name`, and `semantic_tag` (or `tag` alias — use descriptive values like 'pre-refactor', 'baseline', 'v1-before-split').\n• `list_checkpoints` — Lists all saved snapshots grouped by semantic tag. Call this before a comparison to know which tags exist. Only `repoPath` is relevant (optional).\n• `compare_checkpoint` — Structurally compares two named snapshots of a symbol, ignoring whitespace and line-number differences. Returns an AST-level semantic diff. Call this AFTER editing to verify correctness. Requires `symbol_name`, `tag_a`, `tag_b`; `path` is optional as a disambiguation hint when the same tag+symbol exists in multiple files.\n• `delete_checkpoint` — Deletes checkpoint files from the local checkpoint store. Provide at least one filter (`symbol_name` and/or `semantic_tag`/`tag`). Optional: `path` to disambiguate when the same symbol+tag exists in multiple files."
+                                    "description": "Required — selects the Chronos operation.\n• `save_checkpoint` — Saves an AST-level snapshot of a named symbol under a semantic tag. Call this BEFORE any non-trivial refactor or edit. Requires `path` (source file path), `symbol_name`, and `semantic_tag` (or `tag` alias — use descriptive values like 'pre-refactor', 'baseline', 'v1-before-split').\n• `list_checkpoints` — Lists all saved snapshots grouped by semantic tag. Call this before a comparison to know which tags exist. Only `repoPath` is relevant (optional).\n• `compare_checkpoint` — Structurally compares two named snapshots of a symbol, ignoring whitespace and line-number differences. Returns an AST-level semantic diff. Call this AFTER editing to verify correctness. Requires `symbol_name`, `tag_a`, `tag_b`; `path` is optional as a disambiguation hint when the same tag+symbol exists in multiple files.\n• `delete_checkpoint` — Deletes checkpoint files from the local checkpoint store. Provide `namespace` alone to purge an entire namespace directory (e.g. cleaning up all QC checkpoints in one call). Or provide `symbol_name` and/or `semantic_tag`/`tag` to filter within a namespace. Optional: `path` to disambiguate when the same symbol+tag exists in multiple files."
                                 },
                                 "repoPath": { "type": "string", "description": "Optional absolute path to the repo root." },
-                                "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 7500 (inline-safe), max 30000." },
+                                "namespace": { "type": "string", "description": "Optional grouping bucket for checkpoints (default: 'default'). Use a distinct name like 'qa-run-1' per test session. To clean up all QC checkpoints at once: action='delete_checkpoint' with only namespace='qa-run-1' (omit symbol_name and semantic_tag) to purge the entire namespace directory." },
+                                "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 60000 (inline-safe), no hard server-side cap." },
 
                                 "path": { "type": "string", "description": "(save_checkpoint/compare_checkpoint) Source file path. Optional for compare (disambiguation)." },
                                 "symbol_name": { "type": "string", "description": "(save_checkpoint/compare_checkpoint) Target symbol." },
@@ -130,7 +131,7 @@ impl ServerState {
                             "type": "object",
                             "properties": {
                                 "repoPath": { "type": "string" },
-                                "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 7500 (inline-safe), max 30000." }
+                                "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 60000 (inline-safe), no hard server-side cap." }
                             },
                             "required": ["repoPath"]
                         }
@@ -150,7 +151,7 @@ impl ServerState {
         let max_chars = negotiated_max_chars(&args);
 
         let ok = |text: String| {
-            let text = truncate_output(text, max_chars);
+            let text = force_inline_truncate(text, max_chars);
             json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -159,7 +160,7 @@ impl ServerState {
         };
 
         let err = |msg: String| {
-            let msg = truncate_output(msg, max_chars);
+            let msg = force_inline_truncate(msg, max_chars);
             json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -492,7 +493,8 @@ Please correct your target_dir (or pass repoPath explicitly).",
                             .and_then(|v| v.as_str())
                             .or_else(|| args.get("tag").and_then(|v| v.as_str()))
                             .unwrap_or("");
-                        match checkpoint_symbol(&repo_root, &cfg, p, sym, tag) {
+                        let namespace = args.get("namespace").and_then(|v| v.as_str());
+                        match checkpoint_symbol(&repo_root, &cfg, p, sym, tag, namespace) {
                             Ok(s) => ok(s),
                             Err(e) => err(format!("checkpoint_symbol failed: {e}")),
                         }
@@ -500,7 +502,8 @@ Please correct your target_dir (or pass repoPath explicitly).",
                     "list_checkpoints" => {
                         let repo_root = self.repo_root_from_params(&args);
                         let cfg = load_config(&repo_root);
-                        match list_checkpoints(&repo_root, &cfg) {
+                        let namespace = args.get("namespace").and_then(|v| v.as_str());
+                        match list_checkpoints(&repo_root, &cfg, namespace) {
                             Ok(s) => ok(s),
                             Err(e) => err(format!("list_checkpoints failed: {e}")),
                         }
@@ -535,13 +538,14 @@ Please correct your target_dir (or pass repoPath explicitly).",
                             );
                         };
                         let path = args.get("path").and_then(|v| v.as_str());
+                        let namespace = args.get("namespace").and_then(|v| v.as_str());
                         if tag_b.trim() == "__live__" && path.is_none() {
                             return err(
                                 "Error: tag_b='__live__' requires 'path' (the source file containing the symbol). \
 Please call cortex_chronos again with action='compare_checkpoint', symbol_name='<name>', tag_a='<snapshot-tag>', tag_b='__live__', and path='<file>'.".to_string()
                             );
                         }
-                        match compare_symbol(&repo_root, &cfg, sym, tag_a, tag_b, path) {
+                        match compare_symbol(&repo_root, &cfg, sym, tag_a, tag_b, path, namespace) {
                             Ok(s) => ok(s),
                             Err(e) => {
                                 let msg = e.to_string();
@@ -573,16 +577,21 @@ Common cause: you saved a checkpoint for a different symbol or under a different
                             .map(|s| s.trim())
                             .filter(|s| !s.is_empty());
                         let path = args.get("path").and_then(|v| v.as_str());
+                        let namespace = args.get("namespace").and_then(|v| v.as_str());
 
-                        if symbol_name.is_none() && semantic_tag.is_none() {
+                        // Allow namespace-only purge (omit symbol_name + semantic_tag to wipe
+                        // an entire namespace in one call, e.g. cleaning up a QC run).
+                        // Only reject if ALL of: no namespace context AND no filters.
+                        let has_namespace = namespace.map(|s| !s.trim().is_empty()).unwrap_or(false);
+                        if symbol_name.is_none() && semantic_tag.is_none() && path.is_none() && !has_namespace {
                             return err(
-                                "Error: action 'delete_checkpoint' requires at least one filter: 'symbol_name' and/or 'semantic_tag' (or 'tag'). \
-Please call cortex_chronos again with action='delete_checkpoint' and provide symbol_name='<name>' and/or semantic_tag='<tag>'.\n\
-Tip: use cortex_chronos(action=list_checkpoints) first to see what exists.".to_string(),
+                                "Error: action 'delete_checkpoint' requires at least one filter: 'symbol_name', 'semantic_tag'/'tag', or 'namespace'. \
+Provide 'namespace' alone to purge an entire namespace (e.g. namespace='qa-run-1'). \
+Call cortex_chronos with action='list_checkpoints' first to see what exists.".to_string(),
                             );
                         }
 
-                        match crate::chronos::delete_checkpoints(&repo_root, &cfg, symbol_name, semantic_tag, path) {
+                        match crate::chronos::delete_checkpoints(&repo_root, &cfg, symbol_name, semantic_tag, path, namespace) {
                             Ok(s) => ok(s),
                             Err(e) => err(format!("delete_checkpoints failed: {e}")),
                         }
@@ -909,30 +918,30 @@ pub fn run_stdio_server() -> Result<()> {
     Ok(())
 }
 
-const DEFAULT_MAX_CHARS: usize = 7_500;
-const MAX_MAX_CHARS: usize = 30_000;
+const DEFAULT_MAX_CHARS: usize = 60_000;
 
 fn negotiated_max_chars(args: &serde_json::Value) -> usize {
-    let n = args
-        .get("max_chars")
+    args.get("max_chars")
         .and_then(|v| v.as_u64())
         .map(|n| n as usize)
         .filter(|n| *n > 0)
-        .unwrap_or(DEFAULT_MAX_CHARS);
-    n.min(MAX_MAX_CHARS)
+        .unwrap_or(DEFAULT_MAX_CHARS)
 }
 
-fn truncate_output(mut content: String, max_chars: usize) -> String {
+/// Hard inline cap: always truncates in the response body — never writes to disk.
+/// Safe for any MCP client; the truncation marker makes partial output obvious.
+fn force_inline_truncate(mut content: String, max_chars: usize) -> String {
     if content.len() <= max_chars {
         return content;
     }
+    let total_len = content.len();
     let mut cut = max_chars.min(content.len());
     while cut > 0 && !content.is_char_boundary(cut) {
         cut -= 1;
     }
     content.truncate(cut);
     content.push_str(&format!(
-        "\n\n... ✂️ [OUTPUT TRUNCATED at {max_chars} chars to prevent IDE spill]. If you need more content, narrow your search using 'target_dir', 'search_filter', or reduce the scope of your query."
+        "\n\n... ✂️ [TRUNCATED: {max_chars}/{total_len} chars to prevent IDE spill]"
     ));
     content
 }

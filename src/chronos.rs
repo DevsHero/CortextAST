@@ -17,8 +17,13 @@ pub struct CheckpointRecord {
     pub created_unix_ms: u64,
 }
 
-fn checkpoints_dir(repo_root: &Path, cfg: &Config) -> PathBuf {
-    repo_root.join(&cfg.output_dir).join("checkpoints")
+fn checkpoints_dir(repo_root: &Path, cfg: &Config, namespace: &str) -> PathBuf {
+    let ns = if namespace.trim().is_empty() {
+        "default"
+    } else {
+        namespace.trim()
+    };
+    repo_root.join(&cfg.output_dir).join("checkpoints").join(ns)
 }
 
 fn now_unix_ms() -> u64 {
@@ -117,6 +122,7 @@ pub fn checkpoint_symbol(
     path: &str,
     symbol_name: &str,
     tag: &str,
+    namespace: Option<&str>,
 ) -> Result<String> {
     let tag = tag.trim();
     if tag.is_empty() {
@@ -130,6 +136,8 @@ pub fn checkpoint_symbol(
     if path.is_empty() {
         return Err(anyhow!("Missing path"));
     }
+    let ns = namespace.unwrap_or("default").trim();
+    let ns = if ns.is_empty() { "default" } else { ns };
 
     let abs = resolve_path(repo_root, path);
     let code = read_symbol(&abs, symbol_name).with_context(|| {
@@ -149,7 +157,7 @@ pub fn checkpoint_symbol(
         created_unix_ms: now_unix_ms(),
     };
 
-    let dir = checkpoints_dir(repo_root, cfg);
+    let dir = checkpoints_dir(repo_root, cfg, ns);
     fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
 
     let fname = format!(
@@ -168,7 +176,8 @@ pub fn checkpoint_symbol(
         .with_context(|| format!("Failed to rename checkpoint to {}", final_path.display()))?;
 
     Ok(format!(
-        "Checkpoint saved.\n- tag: `{}`\n- symbol: `{}`\n- path: `{}`\n- file: {}",
+        "Checkpoint saved.\n- namespace: `{}`\n- tag: `{}`\n- symbol: `{}`\n- path: `{}`\n- file: {}",
+        ns,
         rec.tag,
         rec.symbol,
         rec.path,
@@ -236,19 +245,42 @@ pub fn delete_checkpoints(
     symbol_name: Option<&str>,
     semantic_tag: Option<&str>,
     path_hint: Option<&str>,
+    namespace: Option<&str>,
 ) -> Result<String> {
-    let dir = checkpoints_dir(repo_root, cfg);
+    let ns = namespace.unwrap_or("default").trim();
+    let ns = if ns.is_empty() { "default" } else { ns };
+    let dir = checkpoints_dir(repo_root, cfg, ns);
     if !dir.exists() {
-        return Ok("No checkpoint store found (nothing to delete).".to_string());
+        return Ok(format!(
+            "No checkpoint store found for namespace '{}' (nothing to delete).",
+            ns
+        ));
     }
 
     let symbol_name = symbol_name.map(|s| s.trim()).filter(|s| !s.is_empty());
     let semantic_tag = semantic_tag.map(|s| s.trim()).filter(|s| !s.is_empty());
+    let path_hint = path_hint.map(|s| s.trim()).filter(|s| !s.is_empty());
 
-    let path_hint_rel = path_hint
-        .map(|p| p.trim())
-        .filter(|p| !p.is_empty())
-        .map(|p| normalize_checkpoint_path_hint(repo_root, p));
+    // Namespace-only purge: no filters provided → delete the entire namespace directory.
+    if symbol_name.is_none() && semantic_tag.is_none() && path_hint.is_none() {
+        let count = fs::read_dir(&dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+                    .count()
+            })
+            .unwrap_or(0);
+        fs::remove_dir_all(&dir)
+            .with_context(|| format!("Failed to remove namespace dir {}", dir.display()))?;
+        return Ok(format!(
+            "Purged namespace '{}': deleted {} checkpoint file(s) and the directory {}.",
+            ns,
+            count,
+            dir.display()
+        ));
+    }
+
+    let path_hint_rel = path_hint.map(|p| normalize_checkpoint_path_hint(repo_root, p));
 
     let mut deleted: usize = 0;
     let mut matched: usize = 0;
@@ -296,7 +328,8 @@ pub fn delete_checkpoints(
     }
 
     let mut out = format!(
-        "Deleted {deleted}/{matched} checkpoint(s) from {}.",
+        "Deleted {deleted}/{matched} checkpoint(s) from namespace '{}' ({}).",
+        ns,
         dir.display()
     );
     if !errors.is_empty() {
@@ -306,34 +339,69 @@ pub fn delete_checkpoints(
     Ok(out)
 }
 
-pub fn list_checkpoints(repo_root: &Path, cfg: &Config) -> Result<String> {
-    let dir = checkpoints_dir(repo_root, cfg);
-    if !dir.exists() {
-        return Ok("*(no checkpoints yet)*".to_string());
-    }
+pub fn list_checkpoints(repo_root: &Path, cfg: &Config, namespace: Option<&str>) -> Result<String> {
+    // If a specific namespace is requested, list only that one.
+    // If namespace is None or empty, list ALL namespaces.
+    let parent = repo_root.join(&cfg.output_dir).join("checkpoints");
 
-    let all = load_all(&dir);
-    if all.is_empty() {
-        return Ok("*(no checkpoints yet)*".to_string());
-    }
-
-    let mut by_tag: BTreeMap<String, Vec<CheckpointRecord>> = BTreeMap::new();
-    for rec in all {
-        by_tag.entry(rec.tag.clone()).or_default().push(rec);
-    }
+    let ns_dirs: Vec<(String, PathBuf)> =
+        if let Some(ns) = namespace.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let dir = checkpoints_dir(repo_root, cfg, ns);
+            if !dir.exists() {
+                return Ok(format!("*(no checkpoints in namespace '{ns}' yet)*"));
+            }
+            vec![(ns.to_string(), dir)]
+        } else {
+            // Walk all namespace subdirectories under the checkpoints parent.
+            let mut dirs: Vec<(String, PathBuf)> = Vec::new();
+            if parent.exists() {
+                for ent in fs::read_dir(&parent).into_iter().flatten().flatten() {
+                    let p = ent.path();
+                    if p.is_dir() {
+                        let ns_name = p
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        dirs.push((ns_name, p));
+                    }
+                }
+                dirs.sort_by(|(a, _), (b, _)| a.cmp(b));
+            }
+            if dirs.is_empty() {
+                return Ok("*(no checkpoints yet)*".to_string());
+            }
+            dirs
+        };
 
     let mut out = String::new();
-    out.push_str("## Checkpoints\n\n");
-    for (tag, mut recs) in by_tag {
-        recs.sort_by(|a, b| b.created_unix_ms.cmp(&a.created_unix_ms));
-        out.push_str(&format!("### `{}`\n", tag));
-        for r in recs.iter().take(50) {
-            out.push_str(&format!("- `{}` — `{}`\n", r.symbol, r.path));
+    out.push_str("## Checkpoints\n");
+
+    for (ns_name, dir) in &ns_dirs {
+        let all = load_all(dir);
+        if all.is_empty() {
+            continue;
         }
-        if recs.len() > 50 {
-            out.push_str(&format!("- *... {} more*\n", recs.len() - 50));
+        out.push_str(&format!("\n### Namespace: `{}`\n\n", ns_name));
+        let mut by_tag: BTreeMap<String, Vec<CheckpointRecord>> = BTreeMap::new();
+        for rec in all {
+            by_tag.entry(rec.tag.clone()).or_default().push(rec);
         }
-        out.push('\n');
+        for (tag, mut recs) in by_tag {
+            recs.sort_by(|a, b| b.created_unix_ms.cmp(&a.created_unix_ms));
+            out.push_str(&format!("#### `{}`\n", tag));
+            for r in recs.iter().take(50) {
+                out.push_str(&format!("- `{}` — `{}`\n", r.symbol, r.path));
+            }
+            if recs.len() > 50 {
+                out.push_str(&format!("- *... {} more*\n", recs.len() - 50));
+            }
+            out.push('\n');
+        }
+    }
+
+    if out.trim_end() == "## Checkpoints" {
+        return Ok("*(no checkpoints yet)*".to_string());
     }
     Ok(out)
 }
@@ -377,8 +445,11 @@ pub fn compare_symbol(
     tag_a: &str,
     tag_b: &str,
     path: Option<&str>,
+    namespace: Option<&str>,
 ) -> Result<String> {
-    let dir = checkpoints_dir(repo_root, cfg);
+    let ns = namespace.unwrap_or("default").trim();
+    let ns = if ns.is_empty() { "default" } else { ns };
+    let dir = checkpoints_dir(repo_root, cfg, ns);
     let recs = load_all(&dir);
     if recs.is_empty() {
         return Err(anyhow!(

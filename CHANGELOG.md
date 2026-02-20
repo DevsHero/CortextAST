@@ -11,9 +11,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `cortex_chronos(compare_checkpoint)` supports `tag_b="__live__"` to compare a saved snapshot (`tag_a`) against the current filesystem state (requires `path`).
 - `cortex_symbol_analyzer(action=find_implementations)` to locate Rust/TypeScript implementors of a trait/interface.
 - `cortex_code_explorer(action=deep_slice)` supports `skeleton_only: true` to enforce structural pruning regardless of repo config.
+- **Chronos namespaces:** all Chronos actions accept an optional `namespace` parameter (default: `"default"`). Checkpoints are stored under `checkpoints/<namespace>/`, allowing isolation by session/job. `delete_checkpoint` with only `namespace` purges the entire namespace directory in one call — solves stale QC checkpoint accumulation.
 
 ### Changed
-- Output handling: megatool responses are now negotiated via `max_chars` (default 15 000, max 30 000) and truncated inline with an explicit marker to prevent editor-side spill/interception.
+- Output handling: megatool responses are hard-truncated inline by `force_inline_truncate` at `max_chars` (default **60 000**, no server-side cap). Output is **never written to disk** — the `✂️ [TRUNCATED: n/total]` marker makes partial output explicit. Lower `max_chars` to e.g. `7500` when your client has a tight inline-display limit.
 - `cortex_symbol_analyzer(action=read_source)` supports `skeleton_only: true` to return structural signatures only (token-saving mode).
 
 ### Fixed

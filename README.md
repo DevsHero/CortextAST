@@ -201,10 +201,11 @@ To maximise CortexAST's effectiveness, add the rules below to your AI assistant'
 - 🎯 Find implementors → `cortex_symbol_analyzer(action: find_implementations)` when changing traits/interfaces.
 - 🎯 Measure blast radius → `cortex_symbol_analyzer(action: blast_radius)` BEFORE any rename, move, or delete.
 - 🎯 Cross-boundary propagation → `cortex_symbol_analyzer(action: propagation_checklist)` before changing a shared type/struct/interface.
-- ⏳ Save a snapshot → `cortex_chronos(action: save_checkpoint)` BEFORE any non-trivial refactor.
+- ⏳ Save a snapshot → `cortex_chronos(action: save_checkpoint)` BEFORE any non-trivial refactor. Use `namespace` to group checkpoints by session (e.g. `namespace='qa-run-1'`).
 - ⏳ Verify a refactor → `cortex_chronos(action: compare_checkpoint)` AFTER editing (NEVER use git diff for this). Tip: `tag_b='__live__'` compares against the current filesystem state.
+- ⏳ Clean up QC checkpoints → `cortex_chronos(action: delete_checkpoint, namespace='qa-run-1')` — omit `symbol_name`/`semantic_tag` to purge the entire namespace.
 - 🚨 Check for errors → `run_diagnostics` immediately after any code edit.
-- 🔒 Set `max_chars` (default **7500**; max 30000) to control output size. The 7500 default is calibrated to stay below VS Code Copilot's inline-display threshold (~8 KB). Increase only when you explicitly need more context.
+- 🔒 `max_chars` (default **60000**, no hard server-side cap) — all output is force-inline-truncated; it is **never written to disk**. Lower to e.g. `7500` if your MCP client has a tight inline-display limit.
 ```
 
 ### Cursor

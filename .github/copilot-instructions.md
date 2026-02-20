@@ -21,7 +21,7 @@
 | Save pre-change snapshot | `cortex_chronos` | `save_checkpoint` | `path` + `symbol_name` + `semantic_tag` |
 | List snapshots | `cortex_chronos` | `list_checkpoints` | *(none)* |
 | Compare snapshots (AST diff) | `cortex_chronos` | `compare_checkpoint` | `symbol_name` + `tag_a` + `tag_b` *(use `tag_b="__live__"` + `path` to diff against current state)* |
-| Delete old snapshots (housekeeping) | `cortex_chronos` | `delete_checkpoint` | `symbol_name` and/or `semantic_tag` *(optional: `path`)* |
+| Delete old snapshots (housekeeping) | `cortex_chronos` | `delete_checkpoint` | `symbol_name` and/or `semantic_tag` *(optional: `path`, `namespace`)* — OR `namespace` alone to purge all checkpoints in that namespace |
 | Compile/lint diagnostics | `run_diagnostics` | *(none)* | `repoPath` |
 
 ## The Ultimate CortexAST Refactoring SOP
@@ -59,7 +59,7 @@ Follow this sequence for any non-trivial refactor (especially renames, signature
 7. **Cross‑Sync** → `cortex_symbol_analyzer(action: propagation_checklist)` when touching shared types/contracts
 
 **Output safety (spill prevention):**
-- Output is automatically truncated at `max_chars` (default **7500**, max 30000) — calibrated to stay below VS Code Copilot's ~8 KB inline-display threshold. Set `max_chars` explicitly only when you need a larger slice and accept possible file spill.
+- Output is always force-inline-truncated at `max_chars` (default **60000**, no hard server-side cap) — output is **never written to disk**, always returned inline in the MCP response body. Set `max_chars` to a smaller value (e.g. `7500`) when your MCP client has a tight inline-display limit.
 
 **Propagation best practice (Hybrid Omni‑Match):**
 - `propagation_checklist` automatically matches common casing variants of `symbol_name` (PascalCase / camelCase / snake_case).

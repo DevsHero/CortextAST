@@ -70,7 +70,8 @@ Megatools (preferred):
 ```
 
 Output safety:
-- All tools support `max_chars` (default **7500**, max 30000). The 7500 default is calibrated to stay below VS Code Copilot's inline-display threshold (~8 KB). The server truncates inline and appends a `✂️` marker. Increase only when you need larger context and accept possible editor-side file spill.
+- All tools support `max_chars` (default **60000**, no hard server-side cap). Output is always force-inline-truncated by the server and **never written to disk** — the `✂️` marker signals truncation. Lower `max_chars` to e.g. `7500` if your MCP client has a tight inline-display limit.
+- **Chronos namespaces:** All Chronos actions accept an optional `namespace` parameter (default: `"default"`). Use distinct names like `"qa-run-1"` per session, then purge all checkpoints at once with `action=delete_checkpoint, namespace="qa-run-1"` (omit `symbol_name` and `semantic_tag`).
 
 ## 4) Optional Repo Config
 
