@@ -2283,45 +2283,105 @@ pub fn propagation_checklist(target_dir: &Path, symbol_name: &str, ignore_gitign
         }
     }
 
+    // Blast radius guardrails (hard caps): prevent token explosions.
+    const MAX_CHECKLIST_FILES: usize = 50;
+    const MAX_CHARS_TOTAL: usize = 8_000;
+
     let mut out = String::new();
     out.push_str(&format!("## 📋 Propagation Checklist for `{}`\n", symbol_name));
     out.push_str("*Review and update these files to ensure cross-service consistency.*\n\n");
 
+    // Deterministic sorting.
+    proto.sort_by(|a, b| a.0.cmp(&b.0));
+    rust.sort_by(|a, b| a.0.cmp(&b.0));
+    ts.sort_by(|a, b| a.0.cmp(&b.0));
+    py.sort_by(|a, b| a.0.cmp(&b.0));
+    other.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let total_files_affected = proto.len() + rust.len() + ts.len() + py.len() + other.len();
+    let mut total_files_printed: usize = 0;
+    let truncated_by_file_limit = std::cell::Cell::new(false);
+    let truncated_by_char_limit = std::cell::Cell::new(false);
+
+    // Push text while enforcing a hard maximum length (UTF-8 safe).
+    let mut push = |s: &str| -> bool {
+        if out.len() >= MAX_CHARS_TOTAL {
+            truncated_by_char_limit.set(true);
+            return false;
+        }
+        let remaining = MAX_CHARS_TOTAL - out.len();
+        if s.len() <= remaining {
+            out.push_str(s);
+            true
+        } else {
+            let marker = "\n... (Output truncated — token limit reached)\n";
+            let keep = remaining.saturating_sub(marker.len());
+            if keep > 0 {
+                let mut cut = keep.min(s.len());
+                while cut > 0 && !s.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                if cut > 0 {
+                    out.push_str(&s[..cut]);
+                }
+            }
+            out.push_str(marker);
+            truncated_by_char_limit.set(true);
+            false
+        }
+    };
+
     let mut write_section = |title: &str, items: &Vec<(String, usize, Vec<u32>)>| {
-        if items.is_empty() {
+        if items.is_empty() || truncated_by_char_limit.get() || truncated_by_file_limit.get() {
             return;
         }
-        out.push_str(&format!("### {}\n", title));
+        if !push(&format!("### {}\n", title)) {
+            return;
+        }
         for (p, n, lines) in items {
+            if total_files_printed >= MAX_CHECKLIST_FILES {
+                truncated_by_file_limit.set(true);
+                break;
+            }
+
             let mut line_part = String::new();
             if !lines.is_empty() {
-                let shown: Vec<String> = lines
-                    .iter()
-                    .take(5)
-                    .map(|l| l.to_string())
-                    .collect();
+                let shown: Vec<String> = lines.iter().take(5).map(|l| l.to_string()).collect();
                 if lines.len() <= 5 {
                     line_part = format!(" at Lines: {}", shown.join(", "));
                 } else {
                     line_part = format!(" at Lines: {}, …", shown.join(", "));
                 }
             }
-            out.push_str(&format!(
+
+            let line = format!(
                 "- [ ] `{}` ({} usage{}{})\n",
                 p,
                 n,
-                if *n == 1 { "" } else { "s" }
-                ,line_part
-            ));
+                if *n == 1 { "" } else { "s" },
+                line_part
+            );
+            if !push(&line) {
+                break;
+            }
+            total_files_printed += 1;
         }
-        out.push('\n');
+        let _ = push("\n");
     };
 
+    // Logical domain order (stable).
     write_section("📝 Protocol Buffers (Contracts)", &proto);
     write_section("🦀 Rust (Backend/Services)", &rust);
     write_section("🧩 TypeScript (Frontend/UI)", &ts);
     write_section("🐍 Python (Scripts/MLX)", &py);
     write_section("📦 Other Definitions", &other);
+
+    if truncated_by_file_limit.get() {
+        let remaining = total_files_affected.saturating_sub(total_files_printed);
+        let _ = push(&format!(
+            "\n> ⚠️ **BLAST RADIUS WARNING:** Showing the first {MAX_CHECKLIST_FILES} files. There are {remaining} more files affected. This is a highly ubiquitous symbol. Consider scoping your refactoring by passing a specific 'target_dir' to tackle one service at a time.\n"
+        ));
+    }
 
     if proto.is_empty() && rust.is_empty() && ts.is_empty() && py.is_empty() && other.is_empty() {
         out.push_str(&format!("No AST-accurate usages found under {}.\n", abs_dir.display()));
