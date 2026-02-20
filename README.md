@@ -83,19 +83,6 @@ Generates a strict Markdown checklist grouped by language / domain (Proto → Ru
 - Hard cap: 50 files, 8 000 chars; BLAST RADIUS WARNING if exceeded
 - `changed_path` — legacy file-based mode (still supported)
 
----
-
-## 🏆 Benchmarks
-
-**Target:** CortexAST source (10+ Rust files, core logic)  
-**Hardware:** Apple M4 Pro / 14 CPU · 20 GPU · 24 GB RAM
-
-| Metric | Raw Copy-Paste | 🧠 CortexAST |
-|:---|:---|:---|
-| **Total Size** | 127 536 bytes | **9 842 bytes — 92.3 % smaller** |
-| **Est. Token Cost** | ~31 884 tokens | **~2 460 tokens** |
-| **Processing Time** | N/A | **< 0.1 s (Pure Rust)** |
-| **Information Density** | Low (noise-heavy) | **High (pure logic)** |
 
 ---
 
@@ -105,6 +92,13 @@ Generates a strict Markdown checklist grouped by language / domain (Proto → Ru
 - **JIT Hybrid Vector Search** — `model2vec-rs` (pure Rust, < 100 MB RAM); `xxh3` content hashing; incremental updates on-demand only
 - **Enterprise Workspace Engine** — auto-discovers nested microservices (`Cargo.toml`, `package.json`, `pyproject.toml`) and routes token budgets across monorepos
 - **Bulletproof Safety** — null-byte detection, 1 MB file cap, minified-bundle guard, UTF-8 lossy fallback, index auto-repair
+
+---
+
+## 🤖 Agentic Workflow Playbook
+
+Want to see what CortexAST looks like when an agent runs it like a Senior Architect?
+Read: [USE_CASES.md](USE_CASES.md)
 
 ---
 ## 📦 Installation
