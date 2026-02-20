@@ -2601,6 +2601,238 @@ struct UsageMatch {
     context: String,
 }
 
+struct ImplementationMatch {
+    language: &'static str,
+    implementor: String,
+    file: String,
+    line_1: u32,
+    context: String,
+}
+
+pub fn find_implementations(target_dir: &Path, trait_or_interface: &str) -> Result<String> {
+    use ignore::WalkBuilder;
+    use std::collections::BTreeMap;
+
+    let abs_dir: PathBuf = if target_dir.is_absolute() {
+        target_dir.to_path_buf()
+    } else {
+        std::env::current_dir().context("Failed to get cwd")?.join(target_dir)
+    };
+
+    let trait_or_interface = trait_or_interface.trim();
+    if trait_or_interface.is_empty() {
+        return Err(anyhow!("Missing symbol_name"));
+    }
+
+    let walker = WalkBuilder::new(&abs_dir)
+        .standard_filters(true)
+        .hidden(true)
+        .build();
+
+    let cfg = language_config();
+    let mut all_results: Vec<ImplementationMatch> = Vec::new();
+
+    for entry_result in walker {
+        let Ok(entry) = entry_result else { continue };
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        // Only process files with a supported language driver.
+        if cfg.driver_for_path(path).is_none() {
+            continue;
+        }
+
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let lang: &'static str = match ext.as_str() {
+            "rs" => "rust",
+            "ts" | "tsx" | "js" | "jsx" => "ts",
+            _ => continue,
+        };
+
+        let Ok(raw) = std::fs::read(path) else { continue };
+        if raw.contains(&0u8) {
+            continue;
+        }
+        let Ok(source_text) = std::str::from_utf8(&raw) else { continue };
+        if !source_text.contains(trait_or_interface) {
+            continue;
+        }
+
+        let Some(driver) = cfg.driver_for_path(path) else { continue };
+        let language = driver.language_for_path(path);
+        let source = source_text.as_bytes();
+
+        let mut parser = Parser::new();
+        if parser.set_language(&language).is_err() {
+            continue;
+        }
+        let Some(tree) = parser.parse(source_text, None) else { continue };
+        let root = tree.root_node();
+
+        let text_lines: Vec<&str> = source_text.lines().collect();
+        let display_path = path.to_string_lossy().to_string();
+
+        match lang {
+            "rust" => {
+                // Collect impl Trait for Type blocks.
+                let queries = [
+                    r#"(impl_item trait: (type_identifier) @trait type: (type_identifier) @impl) @def"#,
+                    r#"(impl_item trait: (scoped_type_identifier name: (type_identifier) @trait) type: (type_identifier) @impl) @def"#,
+                    r#"(impl_item trait: (type_identifier) @trait type: (generic_type type: (type_identifier) @impl)) @def"#,
+                    r#"(impl_item trait: (scoped_type_identifier name: (type_identifier) @trait) type: (generic_type type: (type_identifier) @impl)) @def"#,
+                ];
+
+                for qsrc in queries {
+                    let Ok(query) = Query::new(&language, qsrc) else { continue };
+                    let mut cursor = QueryCursor::new();
+                    let mut matches = cursor.matches(&query, root, source);
+                    while let Some(m) = matches.next() {
+                        let mut trait_name = None;
+                        let mut impl_name = None;
+                        let mut def_row_0: Option<usize> = None;
+                        for cap in m.captures {
+                            let cap_name = query.capture_names()[cap.index as usize];
+                            match cap_name {
+                                "trait" => {
+                                    let t = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                                        .unwrap_or("")
+                                        .trim();
+                                    if !t.is_empty() {
+                                        trait_name = Some(t.to_string());
+                                    }
+                                }
+                                "impl" => {
+                                    let t = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                                        .unwrap_or("")
+                                        .trim();
+                                    if !t.is_empty() {
+                                        impl_name = Some(t.to_string());
+                                    }
+                                }
+                                "def" => {
+                                    def_row_0 = Some(cap.node.start_position().row);
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        if trait_name.as_deref() != Some(trait_or_interface) {
+                            continue;
+                        }
+                        let Some(implementor) = impl_name else { continue };
+                        let row_0 = def_row_0.unwrap_or(0);
+                        all_results.push(ImplementationMatch {
+                            language: "rust",
+                            implementor,
+                            file: display_path.clone(),
+                            line_1: row_0 as u32 + 1,
+                            context: extract_context_lines(&text_lines, row_0, 2),
+                        });
+                    }
+                }
+            }
+            "ts" => {
+                // Collect: class Foo implements Bar
+                let mut stack: Vec<Node> = vec![root];
+                while let Some(n) = stack.pop() {
+                    // Push children
+                    let mut c = n.walk();
+                    for ch in n.children(&mut c) {
+                        stack.push(ch);
+                    }
+
+                    if n.kind() != "class_declaration" {
+                        continue;
+                    }
+
+                    let mut class_name: Option<String> = None;
+                    let mut implements_clause: Option<Node> = None;
+
+                    let mut cw = n.walk();
+                    for ch in n.children(&mut cw) {
+                        if class_name.is_none() && (ch.kind() == "type_identifier" || ch.kind() == "identifier") {
+                            class_name = Some(
+                                std::str::from_utf8(&source[ch.start_byte()..ch.end_byte()])
+                                    .unwrap_or("")
+                                    .trim()
+                                    .to_string(),
+                            );
+                        }
+                        if ch.kind() == "implements_clause" {
+                            implements_clause = Some(ch);
+                        }
+                    }
+
+                    let Some(implementor) = class_name.filter(|s| !s.is_empty()) else { continue };
+                    let Some(impls) = implements_clause else { continue };
+
+                    let mut found = false;
+                    let mut to_visit: Vec<Node> = vec![impls];
+                    while let Some(x) = to_visit.pop() {
+                        let mut xw = x.walk();
+                        for ch in x.children(&mut xw) {
+                            let k = ch.kind();
+                            if k == "type_identifier" || k == "identifier" {
+                                let t = std::str::from_utf8(&source[ch.start_byte()..ch.end_byte()])
+                                    .unwrap_or("")
+                                    .trim();
+                                if t == trait_or_interface {
+                                    found = true;
+                                }
+                            }
+                            to_visit.push(ch);
+                        }
+                    }
+
+                    if found {
+                        let row_0 = n.start_position().row;
+                        all_results.push(ImplementationMatch {
+                            language: "ts",
+                            implementor,
+                            file: display_path.clone(),
+                            line_1: row_0 as u32 + 1,
+                            context: extract_context_lines(&text_lines, row_0, 2),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if all_results.is_empty() {
+        return Ok(format!(
+            "No implementations of `{}` found in {}.",
+            trait_or_interface,
+            abs_dir.display()
+        ));
+    }
+
+    // Group by language for readability.
+    let mut by_lang: BTreeMap<&'static str, Vec<ImplementationMatch>> = BTreeMap::new();
+    for m in all_results {
+        by_lang.entry(m.language).or_default().push(m);
+    }
+    let total: usize = by_lang.values().map(|v| v.len()).sum();
+    let mut out = format!("{} implementation(s) of `{}` found:\n\n", total, trait_or_interface);
+
+    for (lang, mut items) in by_lang {
+        items.sort_by(|a, b| a.file.cmp(&b.file).then_with(|| a.line_1.cmp(&b.line_1)).then_with(|| a.implementor.cmp(&b.implementor)));
+        out.push_str(&format!("### {lang} ({})\n\n", items.len()));
+        for m in &items {
+            out.push_str(&format!("[{}:{}] {}\n", m.file, m.line_1, m.implementor));
+            out.push_str(&format!("Context:\n{}\n\n", m.context));
+        }
+    }
+    Ok(out)
+}
+
 /// Recursively collect AST leaf identifier nodes that match `symbol_name`,
 /// skipping comment and string-literal subtrees entirely.
 fn collect_identifier_refs(node: Node, source: &[u8], symbol_name: &str, out: &mut Vec<(u32, &'static str)>) {

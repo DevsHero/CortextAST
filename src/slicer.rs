@@ -30,7 +30,13 @@ pub fn estimate_tokens_from_bytes(total_bytes: u64, chars_per_token: usize) -> u
 /// Slice a specific list of repo-relative file paths into context XML.
 ///
 /// Paths are assumed repo-relative with '/' separators.
-pub fn slice_paths_to_xml(repo_root: &Path, rel_paths: &[String], budget_tokens: usize, cfg: &Config) -> Result<(String, SliceMeta)> {
+pub fn slice_paths_to_xml(
+    repo_root: &Path,
+    rel_paths: &[String],
+    budget_tokens: usize,
+    cfg: &Config,
+    skeleton_only: bool,
+) -> Result<(String, SliceMeta)> {
     let repo_root = repo_root.to_path_buf();
     let target = PathBuf::from(".");
 
@@ -77,7 +83,7 @@ pub fn slice_paths_to_xml(repo_root: &Path, rel_paths: &[String], budget_tokens:
         let content_full = String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
         let rel = e.rel_path.to_string_lossy().replace('\\', "/");
 
-        let content = if cfg.skeleton_mode {
+        let content = if cfg.skeleton_mode || skeleton_only {
             match try_render_skeleton_from_source(&e.abs_path, &content_full) {
                 Ok(Some(s)) => s,
                 Ok(None) => truncate_unknown(&rel, &content_full),
@@ -420,6 +426,7 @@ fn build_xml_from_entries(
     budget_tokens: usize,
     cfg: &Config,
     focus_full_rel: Option<String>,
+    skeleton_only: bool,
 ) -> Result<(String, SliceMeta)> {
     let mut all_paths: Vec<String> = entries
         .iter()
@@ -447,13 +454,14 @@ fn build_xml_from_entries(
         let rel = e.rel_path.to_string_lossy().to_string();
 
         let is_focus_full = focus_full_rel.as_ref().is_some_and(|f| f == &rel.replace('\\', "/"));
+        let skeleton_mode = cfg.skeleton_mode || skeleton_only;
         let content = if is_focus_full {
             content_full
         } else if rel.to_lowercase().ends_with("cargo.toml") {
             compact_cargo_toml(&content_full).unwrap_or_else(|| content_full.clone())
         } else if rel.to_lowercase().ends_with("package.json") {
             compact_package_json(&content_full).unwrap_or_else(|| content_full.clone())
-        } else if cfg.skeleton_mode {
+        } else if skeleton_mode {
             match try_render_skeleton_from_source(&e.abs_path, &content_full) {
                 Ok(Some(s)) => s,
                 Ok(None) => truncate_unknown(&rel, &content_full),
@@ -491,7 +499,13 @@ fn build_xml_from_entries(
     Ok((xml, meta))
 }
 
-pub fn slice_to_xml(repo_root: &Path, target: &Path, budget_tokens: usize, cfg: &Config) -> Result<(String, SliceMeta)> {
+pub fn slice_to_xml(
+    repo_root: &Path,
+    target: &Path,
+    budget_tokens: usize,
+    cfg: &Config,
+    skeleton_only: bool,
+) -> Result<(String, SliceMeta)> {
     // ── Huge-codebase auto-detection ──────────────────────────────────────
     // Perform a cheap pre-scan to count files if needed for auto-detection.
     let use_huge = cfg.huge_codebase.enabled || {
@@ -501,7 +515,7 @@ pub fn slice_to_xml(repo_root: &Path, target: &Path, budget_tokens: usize, cfg: 
     };
 
     if use_huge && target == Path::new(".") {
-        return slice_to_xml_huge(repo_root, budget_tokens, cfg);
+        return slice_to_xml_huge(repo_root, budget_tokens, cfg, skeleton_only);
     }
 
     let opts = build_scan_options(repo_root, target, cfg);
@@ -530,7 +544,7 @@ pub fn slice_to_xml(repo_root: &Path, target: &Path, budget_tokens: usize, cfg: 
             .then_with(|| a_rel.cmp(&b_rel))
     });
 
-    build_xml_from_entries(entries, repo_root, target, budget_tokens, cfg, focus_full_rel)
+    build_xml_from_entries(entries, repo_root, target, budget_tokens, cfg, focus_full_rel, skeleton_only)
 }
 
 /// Estimate whether this is a "large workspace" by counting top-level manifests
@@ -605,7 +619,7 @@ fn build_scan_options(repo_root: &Path, target: &Path, cfg: &Config) -> ScanOpti
 ///
 /// This guarantees that *every* service gets at least a skeleton of its entry points
 /// rather than deeper services being completely crowded out by top-level files.
-pub fn slice_to_xml_huge(repo_root: &Path, budget_tokens: usize, cfg: &Config) -> Result<(String, SliceMeta)> {
+pub fn slice_to_xml_huge(repo_root: &Path, budget_tokens: usize, cfg: &Config, skeleton_only: bool) -> Result<(String, SliceMeta)> {
     let discovery_opts = WorkspaceDiscoveryOptions {
         max_depth: cfg.huge_codebase.member_scan_depth,
         include_patterns: cfg.huge_codebase.include_members.clone(),
@@ -625,6 +639,7 @@ pub fn slice_to_xml_huge(repo_root: &Path, budget_tokens: usize, cfg: &Config) -
             budget_tokens,
             cfg,
             None,
+            skeleton_only,
         );
     }
 
@@ -748,11 +763,13 @@ pub fn slice_to_xml_huge(repo_root: &Path, budget_tokens: usize, cfg: &Config) -
                 .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).to_string());
             let rel = e.rel_path.to_string_lossy().replace('\\', "/");
 
+            let skeleton_mode = cfg.skeleton_mode || skeleton_only;
+
             let content = if rel.to_lowercase().ends_with("cargo.toml") {
                 compact_cargo_toml(&content_full).unwrap_or(content_full)
             } else if rel.to_lowercase().ends_with("package.json") {
                 compact_package_json(&content_full).unwrap_or(content_full)
-            } else if cfg.skeleton_mode {
+            } else if skeleton_mode {
                 match try_render_skeleton_from_source(&e.abs_path, &content_full) {
                     Ok(Some(s)) => s,
                     Ok(None) => truncate_unknown(&rel, &content_full),

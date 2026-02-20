@@ -261,14 +261,14 @@ fn main() -> Result<()> {
         });
 
         let (xml, _meta) = if rel_paths.is_empty() {
-            slice_to_xml(&repo_root, &index_target, cli.budget_tokens, &cfg)?
+            slice_to_xml(&repo_root, &index_target, cli.budget_tokens, &cfg, false)?
         } else {
-            slice_paths_to_xml(&repo_root, &rel_paths, cli.budget_tokens, &cfg)?
+            slice_paths_to_xml(&repo_root, &rel_paths, cli.budget_tokens, &cfg, false)?
         };
         (xml, format!("query:{}", q))
     } else {
         let target = cli.target.clone().context("Missing --target (or provide --query)")?;
-        let (xml, _meta) = slice_to_xml(&repo_root, &target, cli.budget_tokens, &cfg)?;
+        let (xml, _meta) = slice_to_xml(&repo_root, &target, cli.budget_tokens, &cfg, false)?;
         (xml, target.to_string_lossy().to_string())
     };
 

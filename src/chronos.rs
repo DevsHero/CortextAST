@@ -372,7 +372,31 @@ pub fn compare_symbol(
     }
 
     let rec_a = find_one(repo_root, &recs, symbol_name, tag_a, path)?;
-    let rec_b = find_one(repo_root, &recs, symbol_name, tag_b, path)?;
+
+    // Magic tag: compare against current filesystem state.
+    // This avoids requiring a second checkpoint when you just want "before vs now".
+    let live_record;
+    let rec_b = if tag_b == "__live__" {
+        let Some(p) = path.map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+            return Err(anyhow!(
+                "tag_b='__live__' requires 'path' (the source file containing the symbol)."
+            ));
+        };
+        let abs = resolve_path(repo_root, p);
+        let code = read_symbol(&abs, symbol_name)
+            .with_context(|| format!("Failed to extract live symbol `{symbol_name}` from {}", abs.display()))?;
+
+        live_record = CheckpointRecord {
+            tag: "__live__".to_string(),
+            path: normalize_checkpoint_path(repo_root, &abs),
+            symbol: symbol_name.to_string(),
+            code,
+            created_unix_ms: now_unix_ms(),
+        };
+        &live_record
+    } else {
+        find_one(repo_root, &recs, symbol_name, tag_b, path)?
+    };
 
     let fence = guess_code_fence(&rec_a.path);
     let mut out = String::new();

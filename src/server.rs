@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::config::load_config;
 use crate::chronos::{checkpoint_symbol, compare_symbol, list_checkpoints};
-use crate::inspector::{extract_symbols_from_source, render_skeleton, read_symbol_with_options, find_usages, repo_map_with_filter, call_hierarchy, run_diagnostics, propagation_checklist};
+use crate::inspector::{extract_symbols_from_source, render_skeleton, read_symbol_with_options, find_usages, find_implementations, repo_map_with_filter, call_hierarchy, run_diagnostics, propagation_checklist};
 use crate::slicer::{slice_paths_to_xml, slice_to_xml};
 use crate::scanner::{scan_workspace, ScanOptions};
 use crate::vector_store::{CodebaseIndex, IndexJob};
@@ -55,6 +55,7 @@ impl ServerState {
 
                                 "target": { "type": "string", "description": "(deep_slice) Relative path within repo to slice (file or dir). Required for deep_slice." },
                                 "budget_tokens": { "type": "integer", "exclusiveMinimum": 0, "description": "(deep_slice) Token budget (default 32000)." },
+                                "skeleton_only": { "type": "boolean", "description": "(deep_slice) If true, enforces structural pruning (skeleton output only) regardless of config." },
                                 "query": { "type": "string", "description": "(deep_slice) Optional semantic query for vector-ranked slicing." },
                                 "query_limit": { "type": "integer", "description": "(deep_slice) Optional max files in query mode." }
                             },
@@ -69,8 +70,8 @@ impl ServerState {
                             "properties": {
                                 "action": {
                                     "type": "string",
-                                    "enum": ["read_source", "find_usages", "blast_radius", "propagation_checklist"],
-                                    "description": "Required — selects the analysis operation.\n• `read_source` — Extracts the exact full source of a named symbol (function, struct, class, method, variable) via AST from a specific file. Faster and more accurate than cat + manual scanning; zero regex ambiguity. Supports batch extraction: provide `symbol_names` array to fetch multiple symbols in one call. Requires `path` (source file) and `symbol_name`.\n• `find_usages` — Finds all semantic usages (calls, type references, field initializations) of a symbol across a workspace directory. Categorizes by usage type to reduce cognitive load. Requires `symbol_name` and `target_dir`.\n• `blast_radius` — Analyzes the full call hierarchy: shows who calls this function (incoming) and what the function itself calls (outgoing). Run this BEFORE every rename, move, or delete to understand true blast radius. Requires `symbol_name` and `target_dir`.\n• `propagation_checklist` — Generates a strict Markdown checklist of all places a symbol is used, grouped by language and domain, ensuring no cross-module update is missed. Requires `symbol_name`; use `changed_path` for legacy contract-file (e.g. .proto) mode."
+                                    "enum": ["read_source", "find_usages", "find_implementations", "blast_radius", "propagation_checklist"],
+                                    "description": "Required — selects the analysis operation.\n• `read_source` — Extracts the exact full source of a named symbol (function, struct, class, method, variable) via AST from a specific file. Faster and more accurate than cat + manual scanning; zero regex ambiguity. Supports batch extraction: provide `symbol_names` array to fetch multiple symbols in one call. Requires `path` (source file) and `symbol_name`.\n• `find_usages` — Finds all semantic usages (calls, type references, field initializations) of a symbol across a workspace directory. Categorizes by usage type to reduce cognitive load. Requires `symbol_name` and `target_dir`.\n• `find_implementations` — Finds structs/classes that implement a given trait/interface across the workspace. Requires `symbol_name` and `target_dir`.\n• `blast_radius` — Analyzes the full call hierarchy: shows who calls this function (incoming) and what the function itself calls (outgoing). Run this BEFORE every rename, move, or delete to understand true blast radius. Requires `symbol_name` and `target_dir`.\n• `propagation_checklist` — Generates a strict Markdown checklist of all places a symbol is used, grouped by language and domain, ensuring no cross-module update is missed. Requires `symbol_name`; use `changed_path` for legacy contract-file (e.g. .proto) mode."
                                 },
                                 "repoPath": { "type": "string", "description": "Optional absolute path to the repo root." },
                                 "symbol_name": { "type": "string", "description": "Target symbol. Avoid regex or plural words (e.g. use 'auth', 'convert_request')." },
@@ -113,7 +114,7 @@ impl ServerState {
                                 "semantic_tag": { "type": "string", "description": "(save_checkpoint) Semantic tag (e.g. pre-refactor)." },
                                 "tag": { "type": "string", "description": "(save_checkpoint) Alias for semantic_tag." },
                                 "tag_a": { "type": "string", "description": "(compare_checkpoint) First tag." },
-                                "tag_b": { "type": "string", "description": "(compare_checkpoint) Second tag." }
+                                "tag_b": { "type": "string", "description": "(compare_checkpoint) Second tag. Use the magic string '__live__' to compare tag_a against the current filesystem state (requires 'path')." }
                             },
                             "required": ["action"]
                         }
@@ -222,18 +223,19 @@ Please correct your target_dir (or pass repoPath explicitly).",
                         };
                         let target = PathBuf::from(target_str);
                         let budget_tokens = args.get("budget_tokens").and_then(|v| v.as_u64()).unwrap_or(32_000) as usize;
+                        let skeleton_only = args.get("skeleton_only").and_then(|v| v.as_bool()).unwrap_or(false);
                         let cfg = load_config(&repo_root);
 
                         // Optional vector search query.
                         if let Some(q) = args.get("query").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
                             let query_limit = args.get("query_limit").and_then(|v| v.as_u64()).map(|n| n as usize);
-                            match self.run_query_slice(&repo_root, &target, q, query_limit, budget_tokens, &cfg) {
+                            match self.run_query_slice(&repo_root, &target, q, query_limit, budget_tokens, skeleton_only, &cfg) {
                                 Ok(xml) => return ok(xml),
                                 Err(e) => return err(format!("query slice failed: {e}")),
                             }
                         }
 
-                        match slice_to_xml(&repo_root, &target, budget_tokens, &cfg) {
+                        match slice_to_xml(&repo_root, &target, budget_tokens, &cfg, skeleton_only) {
                             Ok((xml, _meta)) => ok(xml),
                             Err(e) => err(format!("slice failed: {e}")),
                         }
@@ -312,6 +314,27 @@ Please correct your target_dir (or pass repoPath explicitly).",
                         match find_usages(&target_dir, sym) {
                             Ok(s) => ok(s),
                             Err(e) => err(format!("find_usages failed: {e}")),
+                        }
+                    }
+                    "find_implementations" => {
+                        let repo_root = self.repo_root_from_params(&args);
+                        let Some(target_str) = args.get("target_dir").and_then(|v| v.as_str()) else {
+                            return err(
+                                "Error: action 'find_implementations' requires both 'symbol_name' and 'target_dir'. You omitted 'target_dir'. \
+                                Use '.' to search the entire repo. \
+                                Please call cortex_symbol_analyzer again with action='find_implementations', symbol_name='<name>', and target_dir='.'.".to_string()
+                            );
+                        };
+                        let Some(sym) = args.get("symbol_name").and_then(|v| v.as_str()) else {
+                            return err(
+                                "Error: action 'find_implementations' requires both 'symbol_name' and 'target_dir'. You omitted 'symbol_name'. \
+                                Please call cortex_symbol_analyzer again with action='find_implementations', symbol_name='<name>', and target_dir='.'.".to_string()
+                            );
+                        };
+                        let target_dir = resolve_path(&repo_root, target_str);
+                        match find_implementations(&target_dir, sym) {
+                            Ok(s) => ok(s),
+                            Err(e) => err(format!("find_implementations failed: {e}")),
                         }
                     }
                     "blast_radius" => {
@@ -416,7 +439,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                     }
                     _ => err(format!(
                         "Error: Invalid or missing 'action' for cortex_symbol_analyzer: received '{action}'. \
-                        Choose one of: 'read_source' (extract symbol AST), 'find_usages' (trace all call sites), \
+                        Choose one of: 'read_source' (extract symbol AST), 'find_usages' (trace all call sites), 'find_implementations' (find implementors of a trait/interface), \
                         'blast_radius' (call hierarchy before rename/delete), or 'propagation_checklist' (cross-module update checklist). \
                         Example: cortex_symbol_analyzer with action='find_usages', symbol_name='my_fn', and target_dir='.'"
                     )),
@@ -492,6 +515,12 @@ Please correct your target_dir (or pass repoPath explicitly).",
                             );
                         };
                         let path = args.get("path").and_then(|v| v.as_str());
+                        if tag_b.trim() == "__live__" && path.is_none() {
+                            return err(
+                                "Error: tag_b='__live__' requires 'path' (the source file containing the symbol). \
+Please call cortex_chronos again with action='compare_checkpoint', symbol_name='<name>', tag_a='<snapshot-tag>', tag_b='__live__', and path='<file>'.".to_string()
+                            );
+                        }
                         match compare_symbol(&repo_root, &cfg, sym, tag_a, tag_b, path) {
                             Ok(s) => ok(s),
                             Err(e) => {
@@ -647,6 +676,7 @@ Tip: use cortex_chronos(action=list_checkpoints) first to see what exists.".to_s
         query: &str,
         query_limit: Option<usize>,
         budget_tokens: usize,
+        skeleton_only: bool,
         cfg: &crate::config::Config,
     ) -> anyhow::Result<String> {
         let mut exclude_dir_names = vec![
@@ -711,9 +741,9 @@ Tip: use cortex_chronos(action=list_checkpoints) first to see what exists.".to_s
         });
 
         let (xml, _meta) = if rel_paths.is_empty() {
-            slice_to_xml(repo_root, target, budget_tokens, cfg)?
+            slice_to_xml(repo_root, target, budget_tokens, cfg, skeleton_only)?
         } else {
-            slice_paths_to_xml(repo_root, &rel_paths, budget_tokens, cfg)?
+            slice_paths_to_xml(repo_root, &rel_paths, budget_tokens, cfg, skeleton_only)?
         };
         Ok(xml)
     }
