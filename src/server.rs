@@ -23,6 +23,44 @@ pub struct ServerState {
     init_root: Option<PathBuf>,
 }
 
+/// Walk up the directory tree from `start` looking for a `.git` dir or a
+/// `.cortexast.json` config file — both are unambiguous project-root markers.
+/// Returns the first ancestor that contains either, or `None`.
+fn find_git_root_from_path(start: &std::path::Path) -> Option<PathBuf> {
+    let mut dir = if start.is_file() {
+        start.parent()?.to_path_buf()
+    } else {
+        start.to_path_buf()
+    };
+    loop {
+        if dir.join(".git").exists() || dir.join(".cortexast.json").exists() {
+            return Some(dir);
+        }
+        match dir.parent() {
+            Some(p) if p != dir => dir = p.to_path_buf(),
+            _ => return None,
+        }
+    }
+}
+
+/// Returns `true` for "useless" roots that indicate the server started with the
+/// wrong cwd (usually $HOME or filesystem root on any OS).
+fn is_dead_root(p: &std::path::Path) -> bool {
+    // Consider the path a dead root when it has ≤ 1 components after the root
+    // (e.g. "/", "/Users/hero", "C:\Users\hero") — no real project lives there.
+    let comp_count = p.components().count();
+    if comp_count <= 1 {
+        return true;
+    }
+    // Also catch $HOME specifically.
+    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+        if p == std::path::Path::new(home.trim()) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Attempt to find the git repository root from the current working directory.
 /// Spawns `git rev-parse --show-toplevel` — fast, reliable, zero dependencies.
 fn detect_git_root() -> Option<PathBuf> {
@@ -62,6 +100,7 @@ impl ServerState {
     }
 
     fn repo_root_from_params(&mut self, params: &serde_json::Value) -> PathBuf {
+        // ── Step 1: standard priority chain ─────────────────────────────────
         let repo_root = params
             .get("repoPath")
             .and_then(|v| v.as_str())
@@ -69,11 +108,41 @@ impl ServerState {
             .map(PathBuf::from)
             // Cached from a prior call in this session
             .or_else(|| self.repo_root.clone())
-            // Captured from MCP initialize params
+            // Captured at startup (--root / env vars / MCP initialize)
             .or_else(|| self.init_root.clone())
-            // Git root detection — reliable when VS Code spawns with HOME as cwd
+            // Git root detection via subprocess
             .or_else(|| detect_git_root())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+        // ── Step 2: Dynamic Git-Root Recovery ────────────────────────────────
+        // If the resolved root is $HOME or filesystem root, the server started
+        // in the wrong cwd.  Try to self-heal using the path hint embedded in
+        // the tool's own arguments ("path", "target_dir", "target").
+        let repo_root = if is_dead_root(&repo_root) {
+            let hint = params.get("path")
+                .or_else(|| params.get("target_dir"))
+                .or_else(|| params.get("target"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
+
+            if let Some(h) = hint {
+                let abs = if std::path::Path::new(h).is_absolute() {
+                    PathBuf::from(h)
+                } else {
+                    // Relative paths are usually relative to the repo root the
+                    // agent intends — try walking up from cwd first, then $HOME.
+                    std::env::current_dir()
+                        .unwrap_or_else(|_| PathBuf::from("."))
+                        .join(h)
+                };
+                find_git_root_from_path(&abs).unwrap_or(repo_root)
+            } else {
+                repo_root
+            }
+        } else {
+            repo_root
+        };
 
         self.repo_root = Some(repo_root.clone());
         repo_root
@@ -898,21 +967,30 @@ pub fn run_stdio_server(startup_root: Option<PathBuf>) -> Result<()> {
 
     let mut state = ServerState::default();
     // Populate init_root from the CLI --root arg first, then try a cascade of
-    // environment variables that reveal the true workspace root.
+    // environment variables — ordered from most specific to most generic —
+    // to detect the true workspace root across all IDEs without explicit config.
     //
-    // Priority (first non-empty wins):
-    //   1. --root <PATH> CLI arg (most explicit — set this in your MCP config)
-    //   2. CORTEXAST_ROOT  — user-provided override via env
-    //   3. VSCODE_WORKSPACE_FOLDER — VS Code injects this into every child process
-    //      it spawns; points to the first workspace folder even when cwd=$HOME
-    //   4. VSCODE_CWD — VS Code's original cwd before it changed to $HOME
+    // Omni-Env priority (first non-empty wins):
+    //   1. --root <PATH>            — explicit CLI flag (MCP config "args")
+    //   2. CORTEXAST_ROOT           — user-defined override
+    //   3. VSCODE_WORKSPACE_FOLDER  — VS Code / Cursor / Windsurf
+    //   4. VSCODE_CWD               — VS Code secondary
+    //   5. IDEA_INITIAL_DIRECTORY   — JetBrains (IntelliJ, GoLand, WebStorm…)
+    //   6. PWD                      — POSIX login shell / Zed / Neovim terminals
+    //   7. INIT_CWD                 — npm/yarn scripts; sometimes set by Node runners
     //
-    // All of these run before detect_git_root() / MCP initialize params, so the
-    // very first tool call targets the correct workspace without needing repoPath.
-    let env_root = std::env::var("CORTEXAST_ROOT")
-        .ok()
+    // Notes:
+    //   • PWD and INIT_CWD are only used when they differ from $HOME — if they
+    //     equal $HOME the IDE spawned badly and they are worthless.
+    //   • All of these are checked before detect_git_root() and the MCP
+    //     initialize params, giving zero-config operation on every major editor.
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
+    let env_root = std::env::var("CORTEXAST_ROOT").ok()
         .or_else(|| std::env::var("VSCODE_WORKSPACE_FOLDER").ok())
         .or_else(|| std::env::var("VSCODE_CWD").ok())
+        .or_else(|| std::env::var("IDEA_INITIAL_DIRECTORY").ok())
+        .or_else(|| std::env::var("PWD").ok().filter(|v| v.trim() != home.trim()))
+        .or_else(|| std::env::var("INIT_CWD").ok().filter(|v| v.trim() != home.trim()))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .map(PathBuf::from);

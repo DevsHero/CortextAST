@@ -56,11 +56,14 @@ Alternatively, set the `CORTEXAST_ROOT` environment variable (useful for Claude 
 
 Fallback priority when `--root` / `CORTEXAST_ROOT` are omitted:
 1. Per-call `repoPath` argument (always works)
-2. `workspaceFolders[0].uri` from MCP `initialize` params (VS Code may or may not send this)
-3. `VSCODE_WORKSPACE_FOLDER` env var — VS Code injects this into every child process it spawns; works even when `initialize` params lack workspace info
-4. `VSCODE_CWD` env var — VS Code's original cwd
-5. `git rev-parse --show-toplevel` from cwd
-6. `cwd` (usually `$HOME` in VS Code — **avoid relying on this**)
+2. `workspaceFolders[0].uri` from MCP `initialize` params
+3. `VSCODE_WORKSPACE_FOLDER` — VS Code / Cursor / Windsurf
+4. `VSCODE_CWD` — VS Code secondary
+5. `IDEA_INITIAL_DIRECTORY` — JetBrains (IntelliJ, GoLand, WebStorm, …)
+6. `PWD` / `INIT_CWD` — POSIX shell / Zed / Neovim (skipped if equal to `$HOME`)
+7. `git rev-parse --show-toplevel` from cwd
+8. **Dynamic Git-Root Recovery** — if all above still resolve to `$HOME` or `/`, the server inspects the `path`/`target_dir`/`target` argument of the incoming tool call and walks up the directory tree looking for a `.git` dir or `.cortexast.json`, permanently healing `repo_root` for the rest of the session
+9. `cwd` (usually `$HOME` in VS Code — **avoid relying on this**)
 
 Restart your MCP client after editing the config.
 
