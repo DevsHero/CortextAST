@@ -250,19 +250,23 @@ pub fn delete_checkpoints(
     let ns = namespace.unwrap_or("default").trim();
     let ns = if ns.is_empty() { "default" } else { ns };
     let dir = checkpoints_dir(repo_root, cfg, ns);
-    if !dir.exists() {
-        return Ok(format!(
-            "No checkpoint store found for namespace '{}' (nothing to delete).",
-            ns
-        ));
-    }
 
     let symbol_name = symbol_name.map(|s| s.trim()).filter(|s| !s.is_empty());
     let semantic_tag = semantic_tag.map(|s| s.trim()).filter(|s| !s.is_empty());
     let path_hint = path_hint.map(|s| s.trim()).filter(|s| !s.is_empty());
 
-    // Namespace-only purge: no filters provided → delete the entire namespace directory.
+    // ── Namespace-only purge (no filters) ─────────────────────────────────
     if symbol_name.is_none() && semantic_tag.is_none() && path_hint.is_none() {
+        // Task 3: if the namespace dir doesn't exist, give a self-teaching error
+        // so the agent knows whether they confused a semantic_tag for a namespace.
+        if !dir.exists() {
+            return Err(anyhow!(
+                "Error: Namespace '{}' does not exist. \
+                If '{}' is actually a semantic tag, you must call delete_checkpoint \
+                with semantic_tag='{}' (leaving namespace as 'default').",
+                ns, ns, ns
+            ));
+        }
         let count = fs::read_dir(&dir)
             .map(|rd| {
                 rd.flatten()
@@ -280,33 +284,55 @@ pub fn delete_checkpoints(
         ));
     }
 
+    // ── Filtered delete ────────────────────────────────────────────────────
     let path_hint_rel = path_hint.map(|p| normalize_checkpoint_path_hint(repo_root, p));
 
     let mut deleted: usize = 0;
     let mut matched: usize = 0;
     let mut errors: Vec<String> = Vec::new();
+    let mut deleted_from: Option<PathBuf> = None;
 
-    for (file_path, rec) in load_all_with_files(&dir) {
-        if let Some(sym) = symbol_name {
-            if rec.symbol != sym {
-                continue;
+    // Search the namespace directory first (if it exists).
+    if dir.exists() {
+        for (file_path, rec) in load_all_with_files(&dir) {
+            if let Some(sym) = symbol_name {
+                if rec.symbol != sym { continue; }
+            }
+            if let Some(tag) = semantic_tag {
+                if rec.tag != tag { continue; }
+            }
+            if let Some(ref hint) = path_hint_rel {
+                if normalize_record_path(repo_root, &rec.path) != *hint { continue; }
+            }
+            matched += 1;
+            match fs::remove_file(&file_path) {
+                Ok(_) => { deleted += 1; deleted_from = Some(dir.clone()); }
+                Err(e) => errors.push(format!("- {}: {e}", file_path.display())),
             }
         }
-        if let Some(tag) = semantic_tag {
-            if rec.tag != tag {
-                continue;
-            }
-        }
-        if let Some(ref hint) = path_hint_rel {
-            if normalize_record_path(repo_root, &rec.path) != *hint {
-                continue;
-            }
-        }
+    }
 
-        matched += 1;
-        match fs::remove_file(&file_path) {
-            Ok(_) => deleted += 1,
-            Err(e) => errors.push(format!("- {}: {e}", file_path.display())),
+    // Task 2: Legacy fallback — if nothing matched in the namespace dir, also
+    // search the flat parent checkpoints/ directory (pre-namespace checkpoint layout).
+    if matched == 0 {
+        let parent = repo_root.join(&cfg.output_dir).join("checkpoints");
+        if parent.exists() && parent != dir {
+            for (file_path, rec) in load_all_with_files(&parent) {
+                if let Some(sym) = symbol_name {
+                    if rec.symbol != sym { continue; }
+                }
+                if let Some(tag) = semantic_tag {
+                    if rec.tag != tag { continue; }
+                }
+                if let Some(ref hint) = path_hint_rel {
+                    if normalize_record_path(repo_root, &rec.path) != *hint { continue; }
+                }
+                matched += 1;
+                match fs::remove_file(&file_path) {
+                    Ok(_) => { deleted += 1; deleted_from = Some(parent.clone()); }
+                    Err(e) => errors.push(format!("- {}: {e}", file_path.display())),
+                }
+            }
         }
     }
 
@@ -327,10 +353,14 @@ pub fn delete_checkpoints(
         ));
     }
 
+    let location = deleted_from
+        .as_deref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| dir.display().to_string());
     let mut out = format!(
         "Deleted {deleted}/{matched} checkpoint(s) from namespace '{}' ({}).",
         ns,
-        dir.display()
+        location
     );
     if !errors.is_empty() {
         out.push_str("\n\nSome deletes failed:\n");

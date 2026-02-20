@@ -99,7 +99,7 @@ impl ServerState {
         }
     }
 
-    fn repo_root_from_params(&mut self, params: &serde_json::Value) -> PathBuf {
+    fn repo_root_from_params(&mut self, params: &serde_json::Value) -> Result<PathBuf, String> {
         // ── Step 1: standard priority chain ─────────────────────────────────
         let repo_root = params
             .get("repoPath")
@@ -144,8 +144,22 @@ impl ServerState {
             repo_root
         };
 
+        // ── Step 3: Dead-root safeguard ───────────────────────────────────────
+        // After all recovery attempts, if root is still OS root or $HOME,
+        // refuse to proceed — return an actionable CRITICAL error the LLM can
+        // act on immediately by providing 'repoPath' explicitly.
+        if is_dead_root(&repo_root) {
+            return Err(format!(
+                "CRITICAL: Workspace root resolved to '{}' (OS root or Home directory). \
+                This would allow tools to destructively scan the entire filesystem. \
+                Please provide the 'repoPath' parameter pointing to your project directory, \
+                e.g. repoPath='/Users/you/projects/my-app'.",
+                repo_root.display()
+            ));
+        }
+
         self.repo_root = Some(repo_root.clone());
-        repo_root
+        Ok(repo_root)
     }
 
     fn tool_list(&self, id: serde_json::Value) -> serde_json::Value {
@@ -293,7 +307,7 @@ impl ServerState {
                     .trim();
                 match action {
                     "map_overview" => {
-                        let repo_root = self.repo_root_from_params(&args);
+                        let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
                         let Some(target_str) = args.get("target_dir").and_then(|v| v.as_str()) else {
                             return err(
                                 "Error: action 'map_overview' requires the 'target_dir' parameter (e.g. '.' for the whole repo). \
@@ -341,7 +355,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                         }
                     }
                     "deep_slice" => {
-                        let repo_root = self.repo_root_from_params(&args);
+                        let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
                         let Some(target_str) = args.get("target").and_then(|v| v.as_str()) else {
                             return err(
                                 "Error: action 'deep_slice' requires the 'target' parameter \
@@ -383,7 +397,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                     .trim();
                 match action {
                     "read_source" => {
-                        let repo_root = self.repo_root_from_params(&args);
+                        let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
                         let Some(p) = args.get("path").and_then(|v| v.as_str()) else {
                             return err(
                                 "Error: action 'read_source' requires both 'path' (source file containing the symbol) \
@@ -428,7 +442,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                         }
                     }
                     "find_usages" => {
-                        let repo_root = self.repo_root_from_params(&args);
+                        let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
                         let Some(target_str) = args.get("target_dir").and_then(|v| v.as_str()) else {
                             return err(
                                 "Error: action 'find_usages' requires both 'symbol_name' and 'target_dir'. You omitted 'target_dir'. \
@@ -449,7 +463,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                         }
                     }
                     "find_implementations" => {
-                        let repo_root = self.repo_root_from_params(&args);
+                        let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
                         let Some(target_str) = args.get("target_dir").and_then(|v| v.as_str()) else {
                             return err(
                                 "Error: action 'find_implementations' requires both 'symbol_name' and 'target_dir'. You omitted 'target_dir'. \
@@ -470,7 +484,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                         }
                     }
                     "blast_radius" => {
-                        let repo_root = self.repo_root_from_params(&args);
+                        let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
                         let Some(target_str) = args.get("target_dir").and_then(|v| v.as_str()) else {
                             return err(
                                 "Error: action 'blast_radius' requires both 'symbol_name' and 'target_dir'. You omitted 'target_dir'. \
@@ -491,7 +505,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                         }
                     }
                     "propagation_checklist" => {
-                        let repo_root = self.repo_root_from_params(&args);
+                        let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
                         // Legacy mode: changed_path checklist (if provided).
                         if let Some(changed_path) = args.get("changed_path").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty()) {
                             let abs = resolve_path(&repo_root, changed_path);
@@ -585,7 +599,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                     .trim();
                 match action {
                     "save_checkpoint" => {
-                        let repo_root = self.repo_root_from_params(&args);
+                        let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
                         let cfg = load_config(&repo_root);
                         let Some(p) = args.get("path").and_then(|v| v.as_str()) else {
                             return err(
@@ -615,7 +629,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                         }
                     }
                     "list_checkpoints" => {
-                        let repo_root = self.repo_root_from_params(&args);
+                        let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
                         let cfg = load_config(&repo_root);
                         let namespace = args.get("namespace").and_then(|v| v.as_str());
                         match list_checkpoints(&repo_root, &cfg, namespace) {
@@ -624,7 +638,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                         }
                     }
                     "compare_checkpoint" => {
-                        let repo_root = self.repo_root_from_params(&args);
+                        let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
                         let cfg = load_config(&repo_root);
                         let Some(sym) = args.get("symbol_name").and_then(|v| v.as_str()) else {
                             return err(
@@ -677,7 +691,7 @@ Common cause: you saved a checkpoint for a different symbol or under a different
                         }
                     }
                     "delete_checkpoint" => {
-                        let repo_root = self.repo_root_from_params(&args);
+                        let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
                         let cfg = load_config(&repo_root);
 
                         let symbol_name = args
@@ -722,7 +736,7 @@ Call cortex_chronos with action='list_checkpoints' first to see what exists.".to
 
             // Standalone tool
             "run_diagnostics" => {
-                let repo_root = self.repo_root_from_params(&args);
+                let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
                 match run_diagnostics(&repo_root) {
                     Ok(s) => ok(s),
                     Err(e) => err(format!("diagnostics failed: {e}")),
@@ -824,7 +838,7 @@ Call cortex_chronos with action='list_checkpoints' first to see what exists.".to
 
             // Deprecated (kept for now): skeleton reader
             "read_file_skeleton" => {
-                let repo_root = self.repo_root_from_params(&args);
+                let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
                 let Some(p) = args.get("path").and_then(|v| v.as_str()) else {
                     return err("Missing path".to_string());
                 };
