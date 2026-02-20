@@ -816,20 +816,25 @@ fn inline_or_spill(content: String, extension: &str) -> String {
     let ext = extension.trim().trim_start_matches('.');
     let ext = if ext.is_empty() { "txt" } else { ext };
     let path = std::path::PathBuf::from(format!("/tmp/cortexast_spill_{:x}.{ext}", hash));
-    // Inline preview: keep the flow moving without forcing an immediate read_file.
-    const PREVIEW_CHARS: usize = 2_200;
+    const PREVIEW_CHARS: usize = 2_000;
+    const PREVIEW_LINES: usize = 30;
     let mut cut = PREVIEW_CHARS.min(content.len());
     while cut > 0 && !content.is_char_boundary(cut) {
         cut -= 1;
     }
-    let preview = &content[..cut];
+    let head = &content[..cut];
+    let preview = head.lines().take(PREVIEW_LINES).collect::<Vec<_>>().join("\n");
+    let preview = if preview.len() < content.len() {
+        format!("{preview}...")
+    } else {
+        preview
+    };
 
     match std::fs::write(&path, content.as_bytes()) {
         Ok(_) => format!(
-            "📄 Output is large ({} chars, above {INLINE_CHARS_THRESHOLD}-char inline limit).\nWritten to: {}\n\nPreview (truncated):\n{}\n\n… (preview truncated; full content is in the file)\n\nUse `read_file` tool with that path to read the full content.",
+            "📄 **Output is massive ({} chars) and exceeds the inline limit ({INLINE_CHARS_THRESHOLD}).**\nIt has been saved to: `{}`\n\n**PREVIEW (First 2000 chars):**\n```{ext}\n{preview}\n```\n\nHint: Read the preview above. If you need the rest, use your native `read_file` tool on the path provided.",
             content.len(),
             path.display(),
-            preview
         ),
         Err(e) => format!(
             "(Output was {} chars — too large for inline, and failed to write to disk: {e})\n",
