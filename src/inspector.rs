@@ -2180,13 +2180,14 @@ pub fn extract_symbols_from_source(path: &Path, source_text: &str) -> Vec<Symbol
 /// }
 /// ```
 pub fn read_symbol(path: &Path, symbol_name: &str) -> Result<String> {
-    read_symbol_with_options(path, symbol_name, false)
+    read_symbol_with_options(path, symbol_name, false, None)
 }
 
 pub fn read_symbol_with_options(
     path: &Path,
     symbol_name: &str,
     skeleton_only: bool,
+    instance_index: Option<usize>,
 ) -> Result<String> {
     let abs: PathBuf = if path.is_absolute() {
         path.to_path_buf()
@@ -2243,17 +2244,22 @@ pub fn read_symbol_with_options(
         candidates.extend(impl_blocks);
     }
 
-    // ── Step 2: find best match (exact → case-insensitive) ───────────────
-    let found = candidates
+    // ── Step 2: find best match (exact → case-insensitive), collect ALL instances ──
+    let mut all_matches: Vec<&(String, String, usize, usize)> = candidates
         .iter()
-        .find(|(name, _, _, _)| name == symbol_name)
-        .or_else(|| {
-            candidates
-                .iter()
-                .find(|(name, _, _, _)| name.eq_ignore_ascii_case(symbol_name))
-        });
+        .filter(|(name, _, _, _)| name == symbol_name)
+        .collect();
 
-    let Some((name, kind, start_byte, end_byte)) = found else {
+    if all_matches.is_empty() {
+        all_matches = candidates
+            .iter()
+            .filter(|(name, _, _, _)| name.eq_ignore_ascii_case(symbol_name))
+            .collect();
+    }
+
+    let total_matches = all_matches.len();
+
+    if total_matches == 0 {
         let mut available: Vec<String> = candidates
             .iter()
             .map(|(n, k, _, _)| format!("  {k} {n}"))
@@ -2278,7 +2284,11 @@ pub fn read_symbol_with_options(
             rendered.join("\n"),
             symbol_name
         ));
-    };
+    }
+
+    // Select the requested instance (default: first).
+    let idx = instance_index.unwrap_or(0).min(total_matches.saturating_sub(1));
+    let (name, kind, start_byte, end_byte) = all_matches[idx];
 
     // ── Step 3: format and return ─────────────────────────────────────────
     const MAX_SYMBOL_LINES: usize = 500;
@@ -2296,8 +2306,22 @@ pub fn read_symbol_with_options(
         + 1;
     let symbol_lines = end_line.saturating_sub(start_line) + 1;
 
+    // Build disambiguation preamble when multiple instances exist.
+    let disambiguation = if total_matches > 1 {
+        format!(
+            "// ⚠️ Disambiguation: Found {total_matches} instances of `{name}` in this file. \
+Showing instance {} of {total_matches} (1-based). \
+Use `instance_index` param (0-based, 0..{}) to select a specific one. \
+Consider using find_usages to inspect all occurrences across the codebase.\n",
+            idx + 1,
+            total_matches - 1,
+        )
+    } else {
+        String::new()
+    };
+
     let header = format!(
-        "// {kind} `{name}` — {}:L{start_line}-L{end_line}\n",
+        "{disambiguation}// {kind} `{name}` — {}:L{start_line}-L{end_line}\n",
         abs.display()
     );
 
@@ -3448,7 +3472,7 @@ fn extract_context_lines(lines: &[&str], target_0: usize, ctx: usize) -> String 
 ///       [struct  ] User
 /// ```
 pub fn repo_map(target_dir: &Path) -> Result<String> {
-    repo_map_with_filter(target_dir, None, None, false)
+    repo_map_with_filter(target_dir, None, None, false, &[])
 }
 
 pub fn repo_map_with_filter(
@@ -3456,6 +3480,7 @@ pub fn repo_map_with_filter(
     search_filter: Option<&str>,
     max_chars: Option<usize>,
     ignore_gitignore: bool,
+    exclude_dirs: &[String],
 ) -> Result<String> {
     use ignore::WalkBuilder;
     use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -3484,9 +3509,27 @@ pub fn repo_map_with_filter(
             .join(target_dir)
     };
 
+    // Build exclude set from caller-supplied directory names.
+    let excluded_dir_set: HashSet<String> = exclude_dirs
+        .iter()
+        .map(|s| s.trim().trim_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let excluded_dir_set_clone = excluded_dir_set.clone();
+
     let walker_filtered = WalkBuilder::new(&abs_dir)
         .standard_filters(!ignore_gitignore)
         .hidden(true)
+        .filter_entry(move |dent| {
+            if dent.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                if let Some(name) = dent.path().file_name().and_then(|s| s.to_str()) {
+                    if excluded_dir_set_clone.contains(name) {
+                        return false;
+                    }
+                }
+            }
+            true
+        })
         .build();
 
     let cfg = language_config();
@@ -3611,9 +3654,20 @@ pub fn repo_map_with_filter(
 
     // Compute gitignore/ignore-filter drops by comparing against an unfiltered walk.
     let (scanned_total, dropped_by_gitignore_or_error) = if !ignore_gitignore {
+        let excluded_dir_set_all = excluded_dir_set.clone();
         let walker_all = WalkBuilder::new(&abs_dir)
             .standard_filters(false)
             .hidden(true)
+            .filter_entry(move |dent| {
+                if dent.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    if let Some(name) = dent.path().file_name().and_then(|s| s.to_str()) {
+                        if excluded_dir_set_all.contains(name) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            })
             .build();
 
         let mut all_file_count: usize = 0;

@@ -234,7 +234,7 @@ impl ServerState {
                                 "action": {
                                     "type": "string",
                                     "enum": ["map_overview", "deep_slice"],
-                                    "description": "Required — chooses the exploration mode.\n• `map_overview` — Returns a condensed bird's-eye map of all files and public symbols in a directory. Requires `target_dir` (use '.' for whole repo). Optional: `search_filter` (case-insensitive substring/OR filter on paths), `max_chars` (default 8000, safe for VS Code Copilot inline display), `ignore_gitignore`. Returns minimal tokens even for large repos — run this first on any unfamiliar codebase.\n• `deep_slice` — Returns a token-budget-aware XML slice of a file or directory with function bodies pruned to skeletons. Requires `target` (relative path to file or dir). Optional: `budget_tokens` (default 32000), `query` (semantic search to rank most-relevant files first), `query_limit` (max files returned in query mode). When `query` is set, only the most relevant files are included — use this to minimize token waste on large directories."
+                                    "description": "Required — chooses the exploration mode.\n• `map_overview` — Returns a condensed bird's-eye map of all files and public symbols in a directory. Requires `target_dir` (use '.' for whole repo). Optional: `search_filter`, `max_chars`, `ignore_gitignore`, `exclude` (array of dir names to skip). Returns minimal tokens even for large repos — run this first on any unfamiliar codebase.\n• `deep_slice` — Returns a token-budget-aware XML slice of a file or directory with function bodies pruned to skeletons. Requires `target`. Optional: `budget_tokens` (default 32000), `skeleton_only`, `query`, `query_limit`, `exclude` (array of dir names to skip). When `query` is set, only the most relevant files are included."
                                 },
                                 "repoPath": { "type": "string", "description": "Optional absolute path to the repo root (defaults to current working directory)." },
 
@@ -242,6 +242,11 @@ impl ServerState {
                                 "search_filter": { "type": "string", "description": "(map_overview) Optional: case-insensitive substring filter (NOT regex). Supports OR via `foo|bar|baz`." },
                                 "max_chars": { "type": "integer", "description": "Optional: Maximum output characters. Default 8000 — calibrated to stay below VS Code Copilot's ~8 KB inline-display threshold. Raise to up to ~30000 if your client handles large inline output; note VS Code Copilot will spill responses >~8 KB to workspace storage." },
                                 "ignore_gitignore": { "type": "boolean", "description": "(map_overview) Optional: include git-ignored files." },
+                                "exclude": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "(map_overview + deep_slice) Optional: array of directory names to exclude from scanning (e.g. ['node_modules', 'vendor', '__pycache__', 'build']). Matched against the directory's base name, so it applies at every depth. Use this when the repo contains heavy generated/dependency folders that inflate the scan count and trigger summary-only mode."
+                                },
 
                                 "target": { "type": "string", "description": "(deep_slice) Relative path within repo to slice (file or dir). Required for deep_slice." },
                                 "budget_tokens": { "type": "integer", "exclusiveMinimum": 0, "description": "(deep_slice) Token budget (default 32000)." },
@@ -278,6 +283,7 @@ impl ServerState {
                                 "path": { "type": "string", "description": "(read_source) Source file containing the symbol. Required for read_source." },
                                 "symbol_names": { "type": "array", "items": { "type": "string" }, "description": "(read_source) Optional batch mode. If provided, extracts all symbols from `path` and ignores `symbol_name`." },
                                 "skeleton_only": { "type": "boolean", "description": "(read_source only) If true, strips the internal bodies of functions/impls and returns only the structural signatures. Drastically saves tokens when you only need to see the interface/API of a symbol." },
+                                "instance_index": { "type": "integer", "description": "(read_source) 0-based index to select a specific instance when `symbol_name` matches multiple definitions in the same file (e.g. overloaded methods or duplicate function names). Defaults to 0 (first match). The response includes a disambiguation header showing how many instances exist and which one is being returned." },
 
                                 "changed_path": { "type": "string", "description": "(propagation_checklist) Optional legacy mode: path to a changed contract file (e.g. .proto). If provided, overrides symbol-based mode." },
                                 "max_symbols": { "type": "integer", "description": "(propagation_checklist legacy) Optional max extracted symbols (default 20)." }
@@ -378,6 +384,15 @@ impl ServerState {
                             .filter(|s| !s.is_empty());
                         let max_chars = Some(max_chars);
                         let ignore_gitignore = args.get("ignore_gitignore").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let exclude_dirs: Vec<String> = args
+                            .get("exclude")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         let target_dir = resolve_path(&repo_root, target_str);
 
                         // Proactive guardrail: agents often hallucinate paths.
@@ -406,7 +421,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                             ));
                         }
 
-                        match repo_map_with_filter(&target_dir, search_filter, max_chars, ignore_gitignore) {
+                        match repo_map_with_filter(&target_dir, search_filter, max_chars, ignore_gitignore, &exclude_dirs) {
                             Ok(s) => ok(s),
                             Err(e) => err(format!("repo_map failed: {e}")),
                         }
@@ -423,7 +438,16 @@ Please correct your target_dir (or pass repoPath explicitly).",
                         let target = PathBuf::from(target_str);
                         let budget_tokens = args.get("budget_tokens").and_then(|v| v.as_u64()).unwrap_or(32_000) as usize;
                         let skeleton_only = args.get("skeleton_only").and_then(|v| v.as_bool()).unwrap_or(false);
-                        let cfg = load_config(&repo_root);
+                        let mut cfg = load_config(&repo_root);
+
+                        // Merge per-call exclude dirs into config so build_scan_options picks them up.
+                        if let Some(arr) = args.get("exclude").and_then(|v| v.as_array()) {
+                            let extra: Vec<String> = arr
+                                .iter()
+                                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                .collect();
+                            cfg.scan.exclude_dir_names.extend(extra);
+                        }
 
                         // Optional vector search query.
                         if let Some(q) = args.get("query").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
@@ -471,7 +495,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                             let mut out_parts: Vec<String> = Vec::new();
                             for v in arr {
                                 let Some(sym) = v.as_str().filter(|s| !s.trim().is_empty()) else { continue };
-                                match read_symbol_with_options(&abs, sym, skeleton_only) {
+                                match read_symbol_with_options(&abs, sym, skeleton_only, None) {
                                     Ok(s) => out_parts.push(s),
                                     Err(e) => out_parts.push(format!("// ERROR reading `{sym}`: {e}")),
                                 }
@@ -493,7 +517,8 @@ Please correct your target_dir (or pass repoPath explicitly).",
                                 For batch extraction of multiple symbols from the same file, use symbol_names=['A','B'] instead.".to_string()
                             );
                         };
-                        match read_symbol_with_options(&abs, sym, skeleton_only) {
+                        let instance_index = args.get("instance_index").and_then(|v| v.as_u64()).map(|n| n as usize);
+                        match read_symbol_with_options(&abs, sym, skeleton_only, instance_index) {
                             Ok(s) => ok(s),
                             Err(e) => err(format!("read_symbol failed: {e}")),
                         }

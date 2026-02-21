@@ -9,20 +9,20 @@
 
 **Megatool Quick‑Reference**
 
-| Task | Megatool | Action Enum | Required Params |
-|---|---|---|---|
-| Repo overview (files + public symbols) | `cortex_code_explorer` | `map_overview` | `target_dir` (use `.` for whole repo) |
-| Token-budgeted context slice (XML) | `cortex_code_explorer` | `deep_slice` | `target` |
-| Extract exact symbol source | `cortex_symbol_analyzer` | `read_source` | `path` + `symbol_name` *(or `path` + `symbol_names` for batch)* |
-| Find all usages before signature change | `cortex_symbol_analyzer` | `find_usages` | `symbol_name` + `target_dir` |
-| Find trait/interface implementors | `cortex_symbol_analyzer` | `find_implementations` | `symbol_name` + `target_dir` |
-| Blast radius before rename/move/delete | `cortex_symbol_analyzer` | `blast_radius` | `symbol_name` + `target_dir` |
-| Cross-boundary update checklist | `cortex_symbol_analyzer` | `propagation_checklist` | `symbol_name` *(or legacy `changed_path`)* |
-| Save pre-change snapshot | `cortex_chronos` | `save_checkpoint` | `path` + `symbol_name` + `semantic_tag` |
-| List snapshots | `cortex_chronos` | `list_checkpoints` | *(none)* |
-| Compare snapshots (AST diff) | `cortex_chronos` | `compare_checkpoint` | `symbol_name` + `tag_a` + `tag_b` *(use `tag_b="__live__"` + `path` to diff against current state)* |
-| Delete old snapshots (housekeeping) | `cortex_chronos` | `delete_checkpoint` | `symbol_name` and/or `semantic_tag` *(optional: `path`, `namespace`)* — Automatically searches legacy flat `checkpoints/` if no matches in namespace. |
-| Compile/lint diagnostics | `run_diagnostics` | *(none)* | `repoPath` |
+| Task | Megatool | Action Enum | Required Params | Key Optional Params |
+|---|---|---|---|---|
+| Repo overview (files + public symbols) | `cortex_code_explorer` | `map_overview` | `target_dir` (use `.` for whole repo) | `exclude` — array of dir names to skip; `search_filter`; `max_chars`; `ignore_gitignore` |
+| Token-budgeted context slice (XML) | `cortex_code_explorer` | `deep_slice` | `target` | `exclude` — array of dir names to skip; `budget_tokens`; `skeleton_only`; `query`; `query_limit` |
+| Extract exact symbol source | `cortex_symbol_analyzer` | `read_source` | `path` + `symbol_name` *(or `path` + `symbol_names` for batch)* | `instance_index` — 0-based, selects specific instance when duplicates exist; `skeleton_only` |
+| Find all usages before signature change | `cortex_symbol_analyzer` | `find_usages` | `symbol_name` + `target_dir` | |
+| Find trait/interface implementors | `cortex_symbol_analyzer` | `find_implementations` | `symbol_name` + `target_dir` | |
+| Blast radius before rename/move/delete | `cortex_symbol_analyzer` | `blast_radius` | `symbol_name` + `target_dir` | |
+| Cross-boundary update checklist | `cortex_symbol_analyzer` | `propagation_checklist` | `symbol_name` *(or legacy `changed_path`)* | `aliases` — cross-language name variants |
+| Save pre-change snapshot | `cortex_chronos` | `save_checkpoint` | `path` + `symbol_name` + `semantic_tag` | `namespace` |
+| List snapshots | `cortex_chronos` | `list_checkpoints` | *(none)* | `namespace` |
+| Compare snapshots (AST diff) | `cortex_chronos` | `compare_checkpoint` | `symbol_name` + `tag_a` + `tag_b` *(use `tag_b="__live__"` + `path` to diff against current state)* | `namespace`; `path` |
+| Delete old snapshots (housekeeping) | `cortex_chronos` | `delete_checkpoint` | `symbol_name` and/or `semantic_tag` *(optional: `path`, `namespace`)* — Automatically searches legacy flat `checkpoints/` if no matches in namespace. | |
+| Compile/lint diagnostics | `run_diagnostics` | *(none)* | `repoPath` | |
 
 ## The Ultimate CortexAST Refactoring SOP
 
@@ -73,6 +73,17 @@ Follow this sequence for any non-trivial refactor (especially renames, signature
   4. IDE env vars: `VSCODE_WORKSPACE_FOLDER`, `VSCODE_CWD`, `IDEA_INITIAL_DIRECTORY`, `PWD`/`INIT_CWD` (if ≠ `$HOME`) — checked both at startup AND directly inside every tool call (belt-and-suspenders)
   5. Find-up heuristic on the tool's own `path` / `target_dir` / `target` argument — walks ancestors looking for `.git`, `Cargo.toml`, `package.json`
   6. `cwd` — **refused if it equals `$HOME` or OS root** (CRITICAL error)
+
+**`exclude` best practice (map_overview + deep_slice):**
+- If `map_overview` returns "Massive Directory" or the file count is inflated by generated/dependency folders, pass `exclude: ["node_modules", "vendor", "__pycache__", "build"]` to skip them at scan time.
+- The `exclude` array matches against each directory's **base name** (not full path), so it prunes at every depth.
+- Prefer using `exclude` over widening `target_dir` — it keeps the scan scoped while removing noise.
+- Example: `cortex_code_explorer(action="map_overview", target_dir=".", exclude=["node_modules", ".next", "dist"])`
+
+**`instance_index` best practice (read_source):**
+- When `read_source` returns a disambiguation header like `⚠️ Found N instances of 'symbol_name'`, the file contains multiple definitions with the same name (e.g. overloaded methods, duplicate arrow functions).
+- The response **always shows instance 1 of N by default** (0-based index 0). To read a different one, pass `instance_index: 1` (second), `instance_index: 2` (third), etc.
+- If you need to understand all instances, use `find_usages` to locate each one across the codebase, then call `read_source` multiple times with different `instance_index` values.
 
 **Propagation best practice (Hybrid Omni‑Match):**
 - `propagation_checklist` automatically matches common casing variants of `symbol_name` (PascalCase / camelCase / snake_case).

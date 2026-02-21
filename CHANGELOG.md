@@ -9,7 +9,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - _No unreleased changes yet._
 
-## [2.0.0] — Megatool API
+## [2.0.1] — 2026-02-21
+
+### Added
+- **`exclude` parameter for `cortex_code_explorer`** (`map_overview` + `deep_slice`)  
+  Agents can now pass `exclude: ["node_modules", "vendor", "__pycache__", "build"]` to prune directories at scan time.  
+  - Applied as a `filter_entry` predicate on **both** the filtered walker (file discovery) and the unfiltered walker (scan-count diagnostics), so dropped counts remain accurate.  
+  - Matched against each directory's **base name** — pruning applies at every depth without requiring full path patterns.  
+  - `deep_slice` merges per-call `exclude` into `cfg.scan.exclude_dir_names` so the same exclusion list flows through `build_scan_options → scan_workspace`.  
+  - Fixes the QA finding where repos with `node_modules` or large asset folders triggered "Massive Directory" mode despite the source tree being small.
+- **`instance_index` parameter for `cortex_symbol_analyzer` `read_source`**  
+  Resolves the QA finding where files with multiple same-named symbols (overloaded methods, duplicate arrow functions) silently returned only the first instance with no indication that others existed.  
+  - When `N > 1` matches are found, the response prepends a disambiguation header:  
+    `// ⚠️ Disambiguation: Found N instances of 'name'. Showing instance 1 of N (1-based). Use instance_index param (0-based, 0..N-1) to select a specific one.`  
+  - Pass `instance_index: 1` for the second, `instance_index: 2` for the third, etc. Clamps silently to the last valid index.  
+  - Batch mode (`symbol_names`) defaults to instance 0 for each symbol.
+
+### Changed
+- **`cortex_code_explorer` MCP schema** updated: `exclude` array field documented under both `map_overview` and `deep_slice` action descriptions.
+- **`cortex_symbol_analyzer` MCP schema** updated: `instance_index` integer field added to `read_source` action description.
+- **`.github/copilot-instructions.md`** quick-reference table expanded with a "Key Optional Params" column surfacing `exclude` and `instance_index` for faster agent discovery.
+ — Megatool API
 
 ### Breaking Changes (with shims)
 - **10 standalone MCP tools consolidated into 4 Megatools** using `action` enum routing.
