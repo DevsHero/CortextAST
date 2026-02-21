@@ -255,19 +255,21 @@ pub fn hybrid_search(
     tokens: &[&str],
     top_k: usize,
     tag_filter: &[String],
+    project_path_filter: Option<&str>,
 ) -> Vec<RankedEntry> {
-    let indices: Vec<usize> = if tag_filter.is_empty() {
-        (0..store.entries.len()).collect()
-    } else {
-        (0..store.entries.len())
-            .filter(|&i| {
-                store.entries[i]
-                    .tags
-                    .iter()
-                    .any(|t| tag_filter.iter().any(|f| f.eq_ignore_ascii_case(t)))
-            })
-            .collect()
-    };
+    let indices: Vec<usize> = (0..store.entries.len())
+        .filter(|&i| {
+            let e = &store.entries[i];
+            // tag filter
+            let tag_ok = tag_filter.is_empty()
+                || e.tags.iter().any(|t| tag_filter.iter().any(|f| f.eq_ignore_ascii_case(t)));
+            // project_path filter (substring match so callers can pass partial paths)
+            let path_ok = project_path_filter
+                .map(|pf| e.project_path.contains(pf))
+                .unwrap_or(true);
+            tag_ok && path_ok
+        })
+        .collect();
 
     let mut ranked: Vec<RankedEntry> = indices
         .par_iter()
@@ -403,7 +405,7 @@ mod tests {
 
         let store = MemoryStore::load(tmp.path()).expect("store");
         let tokens = ["refactor", "parser"];
-        let results = hybrid_search(&store, None, &tokens, 5, &[]);
+        let results = hybrid_search(&store, None, &tokens, 5, &[], None);
 
         assert!(!results.is_empty(), "must return results");
         assert_eq!(
@@ -424,7 +426,7 @@ mod tests {
         writeln!(tmp, "{other}").unwrap();
 
         let store = MemoryStore::load(tmp.path()).expect("store");
-        let results = hybrid_search(&store, None, &["fix"], 10, &["bugfix".to_string()]);
+        let results = hybrid_search(&store, None, &["fix"], 10, &["bugfix".to_string()], None);
 
         assert_eq!(results.len(), 1, "only one entry has tag 'bugfix'");
         assert_eq!(results[0].entry.id, "id-tagged");

@@ -35,6 +35,9 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # Phase 3: resolve ~/.cortexast/global_memory.jsonl default path.
 dirs = "6.0.0"
 
+# Rules engine: parse YAML rule files for cortex_get_rules deep-merge.
+serde_yaml = "0.9"
+
 # Deep-dive inspection (symbol extraction)
 tree-sitter = "0.26.5"
 tree-sitter-rust = "0.21.0"

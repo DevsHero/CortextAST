@@ -78,7 +78,7 @@ fn hybrid_search_keyword_only_ranks_correctly() {
 
     let store = MemoryStore::load(tmp.path()).unwrap();
     let tokens = ["refactor", "parser", "module"];
-    let results = hybrid_search(&store, None, &tokens, 3, &[]);
+    let results = hybrid_search(&store, None, &tokens, 3, &[], None);
 
     // Print for --nocapture visibility
     println!("\nhybrid_search_keyword_only_ranks_correctly:");
@@ -105,7 +105,7 @@ fn hybrid_search_vector_boosts_relevant_entry() {
     let store = MemoryStore::load(tmp.path()).unwrap();
     let query_vec = relevant_vec; // query points to same dim as "relevant"
     let tokens = ["refactor"];
-    let results = hybrid_search(&store, Some(&query_vec), &tokens, 5, &[]);
+    let results = hybrid_search(&store, Some(&query_vec), &tokens, 5, &[], None);
 
     println!("\nhybrid_search_vector_boosts_relevant_entry:");
     for r in &results {
@@ -125,7 +125,7 @@ fn hybrid_search_tag_filter_excludes_non_matching() {
     writeln!(tmp, "{}", make_entry("c", "fix auth bug", "patched token verification", &["bugfix", "security"], None)).unwrap();
 
     let store = MemoryStore::load(tmp.path()).unwrap();
-    let results = hybrid_search(&store, None, &["fix"], 10, &["bugfix".to_string()]);
+    let results = hybrid_search(&store, None, &["fix"], 10, &["bugfix".to_string()], None);
 
     let ids: Vec<&str> = results.iter().map(|r| r.entry.id.as_str()).collect();
     println!("\nhybrid_search_tag_filter: ids={ids:?}");
@@ -196,7 +196,7 @@ fn e2e_mixed_journal_top_k_respected() {
     // Query semantically close to refactoring, with query_vec pointing dim 0.
     let query_vec = vec_512(0, 1.0);
     let tokens = ["refactor", "auth"];
-    let results = hybrid_search(&store, Some(&query_vec), &tokens, 3, &[]);
+    let results = hybrid_search(&store, Some(&query_vec), &tokens, 3, &[], None);
 
     println!("\ne2e_mixed_journal_top_k_respected:");
     for (i, r) in results.iter().enumerate() {

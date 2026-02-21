@@ -12,6 +12,7 @@ use crate::inspector::{
     run_diagnostics,
 };
 use crate::memory::{hybrid_search, MemoryStore};
+use crate::rules::get_merged_rules;
 use crate::scanner::{scan_workspace, ScanOptions};
 use crate::slicer::{slice_paths_to_xml, slice_to_xml};
 use crate::vector_store::{CodebaseIndex, IndexJob};
@@ -350,12 +351,30 @@ impl ServerState {
                                     "items": { "type": "string" },
                                     "description": "Optional tag filter. When provided only entries that contain at least one of these tags are considered (case-insensitive). E.g. ['refactor', 'bugfix']."
                                 },
+                                "project_path": {
+                                    "type": "string",
+                                    "description": "Optional: Filter results to only entries whose project_path contains this string (e.g. '/Users/hero/work/my-project' or just 'my-project')."
+                                },
                                 "max_chars": {
                                     "type": "integer",
                                     "description": "Optional: Maximum output characters. Default 8000."
                                 }
                             },
                             "required": ["query"]
+                        }
+                    },
+                    {
+                        "name": "cortex_get_rules",
+                        "description": "📜 3-TIER RULE ENGINE — Deep-merges YAML rule files from Global (~/.cortexast/global_rules.yml), Team (~/.cortexast/cluster/{team_id}_rules.yml), and Project (.cortex_rules.yml) tiers. Team ID is sourced from .cortexast.json in the project root. Scalars follow last-write-wins (Project > Team > Global); arrays are unioned. Returns the merged rules as JSON.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "project_path": {
+                                    "type": "string",
+                                    "description": "Absolute path to the project workspace. Used to locate .cortexast.json and .cortex_rules.yml."
+                                }
+                            },
+                            "required": ["project_path"]
                         }
                     }
                 ]
@@ -954,12 +973,19 @@ Call cortex_chronos with action='list_checkpoints' first to see what exists.".to
                     .collect();
                 let tokens: Vec<&str> = tokens_owned.iter().map(String::as_str).collect();
 
+                let project_path_filter = args
+                    .get("project_path")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .map(String::from);
+
                 let results = hybrid_search(
                     &store,
                     query_vec.as_deref(),
                     &tokens,
                     top_k,
                     &tag_filter,
+                    project_path_filter.as_deref(),
                 );
 
                 if results.is_empty() {
@@ -999,6 +1025,28 @@ Call cortex_chronos with action='list_checkpoints' first to see what exists.".to
                     ));
                 }
                 ok(out)
+            }
+
+            "cortex_get_rules" => {
+                let project_path = match args.get("project_path").and_then(|v| v.as_str()) {
+                    Some(p) if !p.trim().is_empty() => p.trim().to_string(),
+                    _ => return err("cortex_get_rules requires a non-empty 'project_path' parameter.".to_string()),
+                };
+
+                match get_merged_rules(&project_path) {
+                    Ok(merged) => {
+                        // Pretty-print as JSON for readability.
+                        let json_pretty = serde_json::to_string_pretty(&merged)
+                            .unwrap_or_else(|_| merged.to_string());
+                        let tiers_desc = format!(
+                            "## Merged Rules for `{project_path}`\n\
+                             **Tier resolution:** Global → Team → Project (project wins)\n\n\
+                             ```json\n{json_pretty}\n```\n"
+                        );
+                        ok(tiers_desc)
+                    }
+                    Err(e) => err(format!("cortex_get_rules error: {e}")),
+                }
             }
 
             // ── Compatibility shims (not exposed in tool_list) ───────────
