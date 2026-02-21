@@ -9,7 +9,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - _No unreleased changes yet._
 
-## [2.0.1] — 2026-02-21
+## [2.0.2] — 2026-02-21
+
+### Fixed
+- **Issue 1 — Stale `get_context_slice` hint in symbol truncation message** (`src/inspector.rs`)  
+  When a symbol exceeded `MAX_SYMBOL_LINES` (500), the truncation footer told agents to  
+  _"use `get_context_slice` with a `byte_range`"_ — an action that no longer exists in the  
+  2.0.0 megatool API. Agents following it would receive a tool error and enter a retry loop.  
+  Replaced with: _"(1) pass `skeleton_only: true` to see signatures only, (2) increase  
+  `max_chars` if your client supports larger output, or (3) refactor this large symbol."_
+
+- **Issue 2 — Opaque path error for `deep_slice` with extensionless target** (`src/server.rs`)  
+  Passing a bare name (e.g. `"orchestrator"` instead of `"orchestrator.rs"`) returned only  
+  _"Target does not exist"_ with no recovery hint.  
+  Added a proactive path guard in the `deep_slice` handler: before dispatching, the resolved  
+  path is checked, and if absent, the parent directory is scanned for entries whose name  
+  contains the requested stem (case-insensitive). Up to 5 suggestions are formatted as  
+  `Did you mean one of: 'orchestrator.rs', ...`. Falls back to a `map_overview` tip when  
+  no candidates are found.
+
+- **Issue 3 — Verbose double-print in `compare_checkpoint` when snapshots are identical** (`src/chronos.rs`)  
+  When `tag_b="__live__"` was used to verify an edit that hadn’t changed the symbol, the  
+  full source body was printed twice (once per snapshot), wasting roughly half the token  
+  budget on duplicate content.  
+  Added an early short-circuit: if `rec_a.code.trim() == rec_b.code.trim()`, a compact  
+  summary is returned instead:  
+  `✅ NO STRUCTURAL DIFF — symbol_name is identical in both snapshots.`  
+  including both file paths for traceability, then returns immediately without printing  
+  the full source.
+ — 2026-02-21
 
 ### Added
 - **`exclude` parameter for `cortex_code_explorer`** (`map_overview` + `deep_slice`)  

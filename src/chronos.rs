@@ -559,7 +559,19 @@ pub fn compare_symbol(
         "## Comparison: `{}` (`{}` vs `{}`)\n\n",
         symbol_name, tag_a, tag_b
     ));
-
+    // Short-circuit: if both snapshots are byte-for-byte identical after trimming,
+    // skip printing the full body twice — this is the common "verify my edit" pattern.
+    if rec_a.code.trim() == rec_b.code.trim() {
+        out.push_str(&format!(
+            "\n✅ **NO STRUCTURAL DIFF** — `{symbol_name}` is identical in \
+ both snapshots.\n\
+ - `{tag_a}` path: `{}`\n\
+ - `{tag_b}` path: `{}`\n\
+\nNo action needed. The symbol was not changed between the two checkpoints.",
+            rec_a.path, rec_b.path
+        ));
+        return Ok(out);
+    }
     out.push_str(&format!("### `{}` — `{}`\n", tag_a, rec_a.path));
     out.push_str(&format!("```{}\n{}\n```\n\n", fence, rec_a.code.trim_end()));
 

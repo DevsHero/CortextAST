@@ -2362,9 +2362,10 @@ Consider using find_usages to inspect all occurrences across the codebase.\n",
         Ok(format!(
             "{header}{truncated}\n\n\
             > ⚠️ **Symbol truncated** — `{name}` is {symbol_lines} lines \
-            (limit: {MAX_SYMBOL_LINES}).  \n\
-            > To read beyond L{cutoff_line}, use `get_context_slice` with a \
-            `byte_range`, or refactor this God object into smaller units.",
+            (limit: {MAX_SYMBOL_LINES}, stopped at L{cutoff_line}).\n\
+            > Options: (1) pass `skeleton_only: true` to see signatures only, \
+            (2) increase `max_chars` if your client supports larger output, \
+            or (3) refactor this large symbol into smaller units.",
         ))
     } else {
         Ok(format!("{header}{body}"))

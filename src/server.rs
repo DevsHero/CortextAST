@@ -436,6 +436,61 @@ Please correct your target_dir (or pass repoPath explicitly).",
                             );
                         };
                         let target = PathBuf::from(target_str);
+
+                        // Proactive path guard: give a "did you mean?" hint when the target
+                        // doesn't exist (e.g. agent passes "orchestrator" instead of "orchestrator.rs").
+                        {
+                            let target_abs = if target.is_absolute() {
+                                target.clone()
+                            } else {
+                                repo_root.join(&target)
+                            };
+                            if !target_abs.exists() {
+                                let stem = target_abs
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or(target_str)
+                                    .to_ascii_lowercase();
+                                let parent = target_abs.parent().unwrap_or(&repo_root);
+                                let search_root = if parent.exists() { parent } else { &repo_root };
+                                let mut suggestions: Vec<String> = Vec::new();
+                                if let Ok(rd) = std::fs::read_dir(search_root) {
+                                    for e in rd.flatten() {
+                                        let fname = e.file_name();
+                                        let fname_str = fname.to_string_lossy();
+                                        if fname_str.to_ascii_lowercase().contains(&stem) {
+                                            if let Ok(rel) = e.path().strip_prefix(&repo_root) {
+                                                suggestions.push(
+                                                    rel.to_string_lossy().replace('\\', "/")
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                suggestions.sort();
+                                suggestions.truncate(5);
+                                let hint = if suggestions.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(
+                                        "\nDid you mean one of: {}",
+                                        suggestions
+                                            .iter()
+                                            .map(|s| format!("'{s}'"))
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    )
+                                };
+                                return err(format!(
+                                    "Error: Target '{}' does not exist in repo root '{}'.{hint}\n\
+                                    Tip: Use cortex_code_explorer(action='map_overview', target_dir='.') \
+                                    to browse the repo structure first.",
+                                    target_str,
+                                    repo_root.display(),
+                                ));
+                            }
+                        }
+
                         let budget_tokens = args.get("budget_tokens").and_then(|v| v.as_u64()).unwrap_or(32_000) as usize;
                         let skeleton_only = args.get("skeleton_only").and_then(|v| v.as_bool()).unwrap_or(false);
                         let mut cfg = load_config(&repo_root);
