@@ -12,6 +12,7 @@ pub mod chronos;
 pub mod config;
 pub mod inspector;
 pub mod mapper;
+pub mod memory;
 pub mod scanner;
 pub mod server;
 pub mod slicer;

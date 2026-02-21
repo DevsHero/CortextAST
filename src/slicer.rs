@@ -530,8 +530,7 @@ pub fn slice_to_xml(
     // Perform a cheap pre-scan to count files if needed for auto-detection.
     let use_huge = cfg.huge_codebase.enabled || {
         // Quick estimate: count manifest files as a proxy for workspace size.
-        let is_large_workspace = is_large_workspace(repo_root);
-        is_large_workspace
+        is_large_workspace(repo_root)
     };
 
     if use_huge && target == Path::new(".") {
@@ -590,14 +589,11 @@ fn is_large_workspace(root: &Path) -> bool {
     // A package.json with many workspaces entries.
     let pkg_json = root.join("package.json");
     if pkg_json.exists() {
-        if let Ok(v) = std::fs::read_to_string(&pkg_json)
+        if let Ok(Ok(v)) = std::fs::read_to_string(&pkg_json)
             .map(|t| serde_json::from_str::<serde_json::Value>(&t))
         {
-            if let Ok(v) = v {
-                let has_workspaces = v.get("workspaces").is_some();
-                if has_workspaces {
-                    return true;
-                }
+            if v.get("workspaces").is_some() {
+                return true;
             }
         }
     }
@@ -687,7 +683,7 @@ pub fn slice_to_xml_huge(
 
     // Also include a root-level slice (top-level manifests, READMEs, workspace config).
     // This gets 10% of the total budget or 2000 tokens, whichever is smaller.
-    let root_budget = (budget_tokens / 10).min(2_000).max(500);
+    let root_budget = (budget_tokens / 10).clamp(500, 2_000);
 
     let mut all_files: Vec<(String, String)> = Vec::new();
     let mut repo_map_sections: Vec<String> = Vec::new();
@@ -727,7 +723,7 @@ pub fn slice_to_xml_huge(
                 })
                 .collect();
 
-            let root_section = format!("# ROOT (workspace root)\n");
+            let root_section = "# ROOT (workspace root)\n".to_string();
             repo_map_sections.push(root_section);
 
             let mut root_used: u64 = 0;

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use model2vec_rs::model::StaticModel;
 use serde_json::json;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -10,6 +11,7 @@ use crate::inspector::{
     propagation_checklist, read_symbol_with_options, render_skeleton, repo_map_with_filter,
     run_diagnostics,
 };
+use crate::memory::{hybrid_search, MemoryStore};
 use crate::scanner::{scan_workspace, ScanOptions};
 use crate::slicer::{slice_paths_to_xml, slice_to_xml};
 use crate::vector_store::{CodebaseIndex, IndexJob};
@@ -326,6 +328,34 @@ impl ServerState {
                                 "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 8000 (safe for VS Code Copilot inline)." }
                             },
                             "required": ["repoPath"]
+                        }
+                    },
+                    {
+                        "name": "cortex_memory_retriever",
+                        "description": "🧠 MEMORY RETRIEVAL — Searches the CortexSync global memory journal (`~/.cortexast/global_memory.jsonl`) for past agent decisions, file edits, and tool-call patterns. Combines semantic vector search with keyword matching (0.7 × cosine + 0.3 × keyword for vectorized entries; keyword-only for Phase-1 entries). Use this BEFORE starting any task to recall what was done in previous sessions. ⚠️ AGENT RULE: Always call this BEFORE any web_search or file exploration — the answer may already be in memory. Returns ranked entries with intent, decision, tags, files_touched, and tool_calls; the embedding vector is omitted from output.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "Required. Natural-language description of the information you are looking for (e.g. 'how did we implement the authentication module last week')."
+                                },
+                                "top_k": {
+                                    "type": "integer",
+                                    "description": "Maximum number of results to return. Default 5.",
+                                    "default": 5
+                                },
+                                "tags": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Optional tag filter. When provided only entries that contain at least one of these tags are considered (case-insensitive). E.g. ['refactor', 'bugfix']."
+                                },
+                                "max_chars": {
+                                    "type": "integer",
+                                    "description": "Optional: Maximum output characters. Default 8000."
+                                }
+                            },
+                            "required": ["query"]
                         }
                     }
                 ]
@@ -883,6 +913,94 @@ Call cortex_chronos with action='list_checkpoints' first to see what exists.".to
                 }
             }
 
+            "cortex_memory_retriever" => {
+                let query = match args.get("query").and_then(|v| v.as_str()) {
+                    Some(q) if !q.trim().is_empty() => q.trim().to_string(),
+                    _ => return err("cortex_memory_retriever requires a non-empty 'query' parameter.".to_string()),
+                };
+                let top_k = args.get("top_k").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(5).max(1);
+                let tag_filter: Vec<String> = args
+                    .get("tags")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+
+                // Load the memory store from the default journal path.
+                let store = MemoryStore::from_default();
+                if store.entries().is_empty() {
+                    return ok(format!(
+                        "Memory journal is empty or does not exist yet.\n\
+                         Expected location: {}\n\n\
+                         Run CortexSync at least once to populate the journal.",
+                        crate::memory::default_journal_path().display()
+                    ));
+                }
+
+                // Embed the query. Load model lazily; graceful fallback to keyword-only on failure.
+                let query_vec: Option<Vec<f32>> = StaticModel::from_pretrained(
+                    "minishlab/potion-retrieval-32M",
+                    None,
+                    None,
+                    None,
+                )
+                .ok()
+                .map(|m| m.encode_single(&format!("query: {}", query)));
+
+                // Tokenise the raw query for keyword scoring.
+                let tokens_owned: Vec<String> = query
+                    .split_whitespace()
+                    .filter(|t| t.len() >= 2)
+                    .map(|t| t.to_lowercase())
+                    .collect();
+                let tokens: Vec<&str> = tokens_owned.iter().map(String::as_str).collect();
+
+                let results = hybrid_search(
+                    &store,
+                    query_vec.as_deref(),
+                    &tokens,
+                    top_k,
+                    &tag_filter,
+                );
+
+                if results.is_empty() {
+                    return ok("No relevant memory entries found for the given query/tags.".to_string());
+                }
+
+                // Serialise results — omit the `vector` field to keep output token-efficient.
+                let mut out = format!(
+                    "## Memory Search Results\n**Query:** {query}\n**Matches:** {}/{} entries\n\n",
+                    results.len(),
+                    store.entries().len()
+                );
+                for (rank, r) in results.iter().enumerate() {
+                    let e = &r.entry;
+                    out.push_str(&format!(
+                        "### #{rank} — score {:.3}\n\
+                         - **id**: {}\n\
+                         - **timestamp**: {}\n\
+                         - **source_ide**: {}\n\
+                         - **project**: {}\n\
+                         - **intent**: {}\n\
+                         - **decision**: {}\n\
+                         - **tags**: {}\n\
+                         - **tool_calls**: {}\n\
+                         - **files_touched**: {}\n\n",
+                        r.score,
+                        e.id,
+                        e.timestamp,
+                        e.source_ide,
+                        e.project_path,
+                        e.intent,
+                        e.decision,
+                        e.tags.join(", "),
+                        e.tool_calls.join(", "),
+                        e.files_touched.join(", "),
+                        rank = rank + 1,
+                    ));
+                }
+                ok(out)
+            }
+
             // ── Compatibility shims (not exposed in tool_list) ───────────
             // Keep these aliases so existing clients don't instantly break.
             "map_repo" => {
@@ -997,10 +1115,11 @@ Call cortex_chronos with action='list_checkpoints' first to see what exists.".to
     }
 
     /// Run vector-search-based slicing (query mode) from the MCP server.
+    #[allow(clippy::too_many_arguments)]
     fn run_query_slice(
         &mut self,
-        repo_root: &PathBuf,
-        target: &PathBuf,
+        repo_root: &std::path::Path,
+        target: &std::path::Path,
         query: &str,
         query_limit: Option<usize>,
         budget_tokens: usize,
@@ -1017,8 +1136,8 @@ Call cortex_chronos with action='list_checkpoints' first to see what exists.".to
         exclude_dir_names.extend(cfg.scan.exclude_dir_names.iter().cloned());
 
         let opts = ScanOptions {
-            repo_root: repo_root.clone(),
-            target: target.clone(),
+            repo_root: repo_root.to_path_buf(),
+            target: target.to_path_buf(),
             max_file_bytes: cfg.token_estimator.max_file_bytes,
             exclude_dir_names,
         };
@@ -1095,7 +1214,7 @@ Call cortex_chronos with action='list_checkpoints' first to see what exists.".to
 }
 
 /// Resolve a path parameter: if absolute, use as-is; otherwise join to repo_root.
-fn resolve_path(repo_root: &PathBuf, p: &str) -> PathBuf {
+fn resolve_path(repo_root: &std::path::Path, p: &str) -> PathBuf {
     let pb = PathBuf::from(p);
     if pb.is_absolute() {
         pb

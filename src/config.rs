@@ -12,21 +12,13 @@ pub struct TokenEstimatorConfig {
 ///
 /// Note: `.gitignore` is always respected by the scanner; these are additional
 /// hard skips for noisy monorepo directories.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScanConfig {
     /// Directory *names* to skip anywhere in the tree (e.g. "generated", "tmp").
     ///
     /// These are compared against path components, not full paths.
     pub exclude_dir_names: Vec<String>,
-}
-
-impl Default for ScanConfig {
-    fn default() -> Self {
-        Self {
-            exclude_dir_names: vec![],
-        }
-    }
 }
 
 /// Hard safety ceiling: files larger than this are **always** skipped, regardless of config.

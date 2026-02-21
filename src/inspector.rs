@@ -3349,7 +3349,7 @@ fn has_ancestor_kind(mut node: Node, target_kinds: &[&str]) -> bool {
             return false;
         };
         let k = parent.kind();
-        if target_kinds.iter().any(|t| *t == k) {
+        if target_kinds.contains(&k) {
             return true;
         }
         node = parent;
@@ -3780,7 +3780,7 @@ Supported extensions include: rs, ts, tsx, js, jsx, py, go.",
     }
 
     let disclosure =
-        if kept_source_files <= DEEP_MAX_FILES && kept_source_files <= STRICT_SUMMARY_THRESHOLD {
+        if kept_source_files <= DEEP_MAX_FILES {
             Disclosure::Deep
         } else if kept_source_files <= FILES_ONLY_MAX_FILES {
             Disclosure::FilesOnly
@@ -3868,33 +3868,31 @@ Supported extensions include: rs, ts, tsx, js, jsx, py, go.",
                     break;
                 }
             }
-            return Ok(out);
+            Ok(out)
         }
         Disclosure::FilesOnly => {
             for (dir_rel, mut files) in by_dir_files {
                 files.sort_by(|a, b| a.0.cmp(&b.0));
-                if !dir_rel.is_empty() {
-                    if !push(&format!("\n{dir_rel}/\n")) {
+                if !dir_rel.is_empty()
+                    && !push(&format!("\n{dir_rel}/\n")) {
                         break;
                     }
-                }
                 for (filename, _abs) in files {
                     if !push(&format!("  {filename}\n")) {
                         break;
                     }
                 }
             }
-            return Ok(out);
+            Ok(out)
         }
         Disclosure::Deep => {
             // Deep mode: read files + extract symbols.
             for (dir_rel, mut files) in by_dir_files {
                 files.sort_by(|a, b| a.0.cmp(&b.0));
-                if !dir_rel.is_empty() {
-                    if !push(&format!("\n{dir_rel}/\n")) {
+                if !dir_rel.is_empty()
+                    && !push(&format!("\n{dir_rel}/\n")) {
                         break;
                     }
-                }
 
                 for (filename, abs_file) in files {
                     if !push(&format!("  {filename}\n")) {
@@ -4255,10 +4253,7 @@ pub fn call_hierarchy(target_dir: &Path, symbol_name: &str) -> Result<String> {
 
         // Extract skeleton (symbol list) for this file — used for definition
         // detection AND for resolving enclosing function context.
-        let syms = match driver.extract_skeleton(path, source, root, language.clone()) {
-            Ok(s) => s,
-            Err(_) => vec![],
-        };
+        let syms: Vec<Symbol> = driver.extract_skeleton(path, source, root, language.clone()).unwrap_or_default();
 
         // 1) Definitions + outgoing calls from definition body
         for sym in &syms {
@@ -4455,7 +4450,7 @@ fn extract_trailing_call_identifier<'a>(target: Node, source: &'a [u8]) -> Optio
     // Fallback: use the full slice and strip module/attribute/namespace prefixes.
     let text = std::str::from_utf8(&source[target.start_byte()..target.end_byte()]).ok()?;
     let last = text
-        .rsplit(|c: char| c == '.' || c == ':')
+        .rsplit(['.', ':'])
         .next()
         .unwrap_or("")
         .trim();
