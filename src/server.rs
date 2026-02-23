@@ -379,6 +379,57 @@ impl ServerState {
                             },
                             "required": ["project_path"]
                         }
+                    },
+                    {
+                        "name": "cortex_remember",
+                        "description": "🧠 CRITICAL MANDATE: Call this tool at the END of EVERY task. Keep `intent` and `decision` strictly under 200 chars each. For research, QA logs, or complex planning, you MUST first write the long-form content to a markdown file in the workspace (e.g. `docs/research.md`, `docs/qa_log.md`), then pass a pointer in `heavy_artifacts`. This is your permanent global memory — POSTs to CortexSync and vectorizes for future semantic recall.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "intent": {
+                                    "type": "string",
+                                    "description": "Compressed user intent (≤ 200 chars). E.g. 'Add JWT auth to Express API'."
+                                },
+                                "decision": {
+                                    "type": "string",
+                                    "description": "Compressed agent decision / approach taken (≤ 200 chars). E.g. 'Used passport-jwt with RS256 keys in .env'."
+                                },
+                                "files_touched": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "List of file paths modified or created."
+                                },
+                                "tags": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Semantic labels for filtering (e.g. ['auth', 'refactor', 'bugfix'])."
+                                },
+                                "heavy_artifacts": {
+                                    "type": "array",
+                                    "description": "Pointers to long-form files written before this call. Use when the task produced research, QA logs, or architecture docs too large to fit in `decision`.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "artifact_type": {
+                                                "type": "string",
+                                                "enum": ["research", "qa_log", "architecture", "other"],
+                                                "description": "Category of the artifact."
+                                            },
+                                            "file_path": {
+                                                "type": "string",
+                                                "description": "Workspace-relative path to the file, e.g. 'docs/qa_log.md'."
+                                            },
+                                            "description": {
+                                                "type": "string",
+                                                "description": "≤50 char summary of the file's content."
+                                            }
+                                        },
+                                        "required": ["artifact_type", "file_path", "description"]
+                                    }
+                                }
+                            },
+                            "required": ["intent", "decision"]
+                        }
                     }
                 ]
             }
@@ -1184,6 +1235,87 @@ Call cortex_chronos with action='list_checkpoints' first to see what exists.".to
                 match render_skeleton(&abs) {
                     Ok(s) => ok(s),
                     Err(e) => err(format!("skeleton failed: {e}")),
+                }
+            }
+
+            // ── cortex_remember ─────────────────────────────────────────────
+            // Commits a compressed memory entry to CortexSync via POST /api/remember.
+            // Must be called at the end of every task.
+            "cortex_remember" => {
+                let intent = args
+                    .get("intent")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let decision = args
+                    .get("decision")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                if intent.trim().is_empty() || decision.trim().is_empty() {
+                    return err(
+                        "cortex_remember: 'intent' and 'decision' are required and must be non-empty."
+                            .to_string(),
+                    );
+                }
+
+                let files_touched: Vec<String> = args
+                    .get("files_touched")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let tags: Vec<String> = args
+                    .get("tags")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let project_path = self
+                    .repo_root
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+
+                // Forward heavy_artifacts as-is (already a JSON array from the LLM).
+                let heavy_artifacts = args
+                    .get("heavy_artifacts")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Array(vec![]));
+
+                let payload = serde_json::json!({
+                    "intent": intent,
+                    "decision": decision,
+                    "project_path": project_path,
+                    "files_touched": files_touched,
+                    "tags": tags,
+                    "heavy_artifacts": heavy_artifacts
+                });
+
+                match ureq::post("http://127.0.0.1:14333/api/remember").send_json(payload) {
+                    Ok(_) => ok(
+                        "Memory successfully vectorized and committed to the global ledger."
+                            .to_string(),
+                    ),
+                    // CortexSync is offline — do NOT fail the MCP call. The LLM
+                    // has already completed its task; failing here would cause
+                    // confusing error noise. Return a warning so the agent knows
+                    // memory was not persisted, but the task outcome is unaffected.
+                    Err(_) => ok(
+                        "[WARNING] CortexSync background daemon is offline. \
+                         Memory could not be saved to the vector ledger, \
+                         but your task is complete."
+                            .to_string(),
+                    ),
                 }
             }
 
