@@ -93,6 +93,28 @@ fn extract_path_from_uri(uri: &str) -> Option<PathBuf> {
     }
 }
 
+/// Helper to read the central codebase map (CortexSync config `codebases.json`)
+fn get_network_map() -> Result<serde_json::Value, String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    
+    // Path for CortexSync codebases config
+    let config_path = PathBuf::from(home).join(".cortexast").join("codebases.json");
+
+    if !config_path.exists() {
+        return Err("Network map configuration not found at ~/.cortexast/codebases.json.".to_string());
+    }
+
+    match std::fs::read_to_string(&config_path) {
+        Ok(contents) => {
+            serde_json::from_str::<serde_json::Value>(&contents)
+                .map_err(|e| format!("Failed to parse network map JSON: {}", e))
+        }
+        Err(e) => Err(format!("Failed to read network map: {}", e)),
+    }
+}
+
 impl ServerState {
     /// Called once when the MCP `initialize` request is received.
     /// Extracts the workspace root from standard LSP/MCP protocol fields and
@@ -222,6 +244,53 @@ impl ServerState {
         Ok(fallback)
     }
 
+    /// Resolves the Omni-AST target project logic, enforcing strict whitelisting.
+    /// Supports resolving from `codebases.json` via either ID or absolute path.
+    fn resolve_target_project(&mut self, params: &serde_json::Value) -> Result<PathBuf, String> {
+        // 1. Retrieve standard `repo_root` as fallback
+        let base_root = self.repo_root_from_params(params)?;
+
+        // 2. Check for Omni-AST `target_project` override
+        if let Some(target_proj_str) = params.get("target_project").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+            
+            // 3. Load Whitelist
+            let network_map = get_network_map()?;
+            let codebases = network_map.as_array()
+                .or_else(|| network_map.get("codebases").and_then(|v| v.as_array()))
+                .ok_or_else(|| "Invalid network map format: missing codebase array.".to_string())?;
+
+            // 4. Resolve by ID first, then fallback to match absolute path
+            let mut resolved_path = None;
+            for codebase in codebases {
+                let id = codebase.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                let path = codebase.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+                
+                if target_proj_str == id || target_proj_str == path {
+                    resolved_path = Some(PathBuf::from(path));
+                    break;
+                }
+            }
+
+            // 5. Enforce Security Constraints
+            let override_path = match resolved_path {
+                Some(p) => p,
+                None => return Err(format!(
+                    "CRITICAL: Omni-AST target_project '{}' is NOT in the approved network map whitelist. Access denied.",
+                    target_proj_str
+                )),
+            };
+
+            if !override_path.exists() {
+                return Err(format!("CRITICAL: Omni-AST target_project path does not exist on disk: '{}'", override_path.display()));
+            }
+
+            return Ok(override_path);
+        }
+
+        // Default to the standard base_root
+        Ok(base_root)
+    }
+
     fn tool_list(&self, id: serde_json::Value) -> serde_json::Value {
         json!({
             "jsonrpc": "2.0",
@@ -240,6 +309,7 @@ impl ServerState {
                                     "description": "Required — chooses the exploration mode.\n• `map_overview` — Returns a condensed bird's-eye map of all files and public symbols in a directory. Requires `target_dir` (use '.' for whole repo). Optional: `search_filter`, `max_chars`, `ignore_gitignore`, `exclude` (array of dir names to skip). Returns minimal tokens even for large repos — run this first on any unfamiliar codebase.\n• `deep_slice` — Returns a token-budget-aware XML slice of a file or directory with function bodies pruned to skeletons. Requires `target`. Optional: `budget_tokens` (default 32000), `skeleton_only`, `query`, `query_limit`, `exclude` (array of dir names to skip), `single_file` (bool — skip vector search entirely and return only target), `only_dir` (restrict semantic query to this subdirectory). When `query` is set, only the most relevant files are included. Set `single_file=true` when target is a specific file you want exclusively, without cross-file spill."
                                 },
                                 "repoPath": { "type": "string", "description": "Optional absolute path to the repo root (defaults to current working directory)." },
+                                "target_project": { "type": "string", "description": "OMNI-AST: Optional ID or absolute path of another codebase in the network map. Overrides repoPath for cross-project exploration." },
 
                                 "target_dir": { "type": "string", "description": "(map_overview) Directory to map (use '.')" },
                                 "search_filter": { "type": "string", "description": "(map_overview) Optional: case-insensitive substring filter (NOT regex). Supports OR via `foo|bar|baz`." },
@@ -274,6 +344,7 @@ impl ServerState {
                                     "description": "Required — selects the analysis operation.\n• `read_source` — Extracts the exact full source of a named symbol (function, struct, class, method, variable) via AST from a specific file. Faster and more accurate than cat + manual scanning; zero regex ambiguity. Supports batch extraction: provide `symbol_names` array to fetch multiple symbols in one call. Requires `path` (source file) and `symbol_name`.\n• `find_usages` — Finds all semantic usages (calls, type references, field initializations) of a symbol across a workspace directory. Categorizes by usage type to reduce cognitive load. Requires `symbol_name` and `target_dir`.\n• `find_implementations` — Finds structs/classes that implement a given trait/interface across the workspace. Requires `symbol_name` and `target_dir`.\n• `blast_radius` — Analyzes the full call hierarchy: shows who calls this function (incoming) and what the function itself calls (outgoing). Run this BEFORE every rename, move, or delete to understand true blast radius. Requires `symbol_name` and `target_dir`.\n• `propagation_checklist` — Generates a strict Markdown checklist of all places a symbol is used, grouped by language and domain (including ⚡ Tauri Commands bridge detection), ensuring no cross-module update is missed. Requires `symbol_name`; use `changed_path` for legacy contract-file (e.g. .proto) mode. Use `only_dir` to scope to a single microservice in polyrepo setups."
                                 },
                                 "repoPath": { "type": "string", "description": "Optional absolute path to the repo root." },
+                                "target_project": { "type": "string", "description": "OMNI-AST: Optional ID or absolute path of another codebase in the network map. Overrides repoPath for cross-project exploration." },
                                 "symbol_name": { "type": "string", "description": "Target symbol. Avoid regex or plural words (e.g. use 'auth', 'convert_request')." },
                                 "target_dir": { "type": "string", "description": "Scope directory (use '.' for entire repo). Required for find_usages/blast_radius; optional for propagation_checklist (defaults '.')." },
                                 "ignore_gitignore": { "type": "boolean", "description": "(propagation_checklist) Include generated / git-ignored stubs." },
@@ -329,6 +400,7 @@ impl ServerState {
                             "type": "object",
                             "properties": {
                                 "repoPath": { "type": "string" },
+                                "target_project": { "type": "string", "description": "OMNI-AST: Optional ID or absolute path of another codebase in the network map. Overrides repoPath for cross-project exploration." },
                                 "max_chars": { "type": "integer", "description": "Optional: Limit output length. Default 8000 (safe for VS Code Copilot inline)." }
                             },
                             "required": ["repoPath"]
@@ -434,6 +506,14 @@ impl ServerState {
                             },
                             "required": ["intent", "decision"]
                         }
+                    },
+                    {
+                        "name": "cortex_list_network",
+                        "description": "🌐 NETWORK MAP — Returns a list of all known AI-tracked codebases in the system. Use this to discover available 'target_project' IDs/paths for cross-codebase Omni-AST operations.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {}
+                        }
                     }
                 ]
             }
@@ -469,6 +549,12 @@ impl ServerState {
 
         match name {
             // ── Megatools ────────────────────────────────────────────────
+            "cortex_list_network" => {
+                match get_network_map() {
+                    Ok(json_data) => ok(serde_json::to_string(&json_data).unwrap_or_default()),
+                    Err(e) => err(e),
+                }
+            }
             "cortex_code_explorer" => {
                 let action = args
                     .get("action")
@@ -477,7 +563,7 @@ impl ServerState {
                     .trim();
                 match action {
                     "map_overview" => {
-                        let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
+                        let repo_root = match self.resolve_target_project(&args) { Ok(r) => r, Err(e) => return err(e) };
                         let Some(target_str) = args.get("target_dir").and_then(|v| v.as_str()) else {
                             return err(
                                 "Error: action 'map_overview' requires the 'target_dir' parameter (e.g. '.' for the whole repo). \
@@ -534,7 +620,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                         }
                     }
                     "deep_slice" => {
-                        let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
+                        let repo_root = match self.resolve_target_project(&args) { Ok(r) => r, Err(e) => return err(e) };
                         let Some(target_str) = args.get("target").and_then(|v| v.as_str()) else {
                             return err(
                                 "Error: action 'deep_slice' requires the 'target' parameter \
@@ -654,7 +740,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                     .trim();
                 match action {
                     "read_source" => {
-                        let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
+                        let repo_root = match self.resolve_target_project(&args) { Ok(r) => r, Err(e) => return err(e) };
                         let Some(p) = args.get("path").and_then(|v| v.as_str()) else {
                             return err(
                                 "Error: action 'read_source' requires both 'path' (source file containing the symbol) \
@@ -700,7 +786,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                         }
                     }
                     "find_usages" => {
-                        let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
+                        let repo_root = match self.resolve_target_project(&args) { Ok(r) => r, Err(e) => return err(e) };
                         let Some(target_str) = args.get("target_dir").and_then(|v| v.as_str()) else {
                             return err(
                                 "Error: action 'find_usages' requires both 'symbol_name' and 'target_dir'. You omitted 'target_dir'. \
@@ -721,7 +807,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                         }
                     }
                     "find_implementations" => {
-                        let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
+                        let repo_root = match self.resolve_target_project(&args) { Ok(r) => r, Err(e) => return err(e) };
                         let Some(target_str) = args.get("target_dir").and_then(|v| v.as_str()) else {
                             return err(
                                 "Error: action 'find_implementations' requires both 'symbol_name' and 'target_dir'. You omitted 'target_dir'. \
@@ -742,7 +828,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                         }
                     }
                     "blast_radius" => {
-                        let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
+                        let repo_root = match self.resolve_target_project(&args) { Ok(r) => r, Err(e) => return err(e) };
                         let Some(target_str) = args.get("target_dir").and_then(|v| v.as_str()) else {
                             return err(
                                 "Error: action 'blast_radius' requires both 'symbol_name' and 'target_dir'. You omitted 'target_dir'. \
@@ -763,7 +849,7 @@ Please correct your target_dir (or pass repoPath explicitly).",
                         }
                     }
                     "propagation_checklist" => {
-                        let repo_root = match self.repo_root_from_params(&args) { Ok(r) => r, Err(e) => return err(e) };
+                        let repo_root = match self.resolve_target_project(&args) { Ok(r) => r, Err(e) => return err(e) };
                         // Legacy mode: changed_path checklist (if provided).
                         if let Some(changed_path) = args.get("changed_path").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty()) {
                             let abs = resolve_path(&repo_root, changed_path);
