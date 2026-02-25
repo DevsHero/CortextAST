@@ -1,12 +1,8 @@
-.neurosiphon/
-.cortexast/
-benchmarks/
-.vscode/
+/target/
+/dist/
+.env
 .DS_Store
-target
-
-
-# AI chat/spec artifacts
+.cortexast/
 .specstory/
+*.specstory
 chat.json
-.github/chat.json
