@@ -26,29 +26,32 @@ CortexAST is a **production-grade MCP (Model Context Protocol) server** that giv
 
 ## Feature Modules
 
-### 🔭 cortex_code_explorer
-Bird's-eye symbol map (`map_overview`) and token-budgeted XML slice (`deep_slice`) of any codebase.
+### 1. 🔭 cortex_code_explorer
+Codebase explorer. Use INSTEAD of ls/tree/find/cat. Two modes: `map_overview` (fast symbol map, near-zero tokens — run first on any repo) and `deep_slice` (token-budgeted XML with function bodies, vector-ranked by query). Use map_overview to orient; deep_slice to get code for editing.
 
-### 🎯 cortex_symbol_analyzer
-AST-accurate `read_source`, `find_usages`, `blast_radius`, and `propagation_checklist` — no grep false positives.
+### 2. 🎯 cortex_symbol_analyzer
+AST symbol analysis. Use INSTEAD of grep/rg. Actions: `read_source` (extract exact source of a symbol from a file — do this before editing), `find_usages` (all call/type/field sites), `find_implementations` (structs implementing a trait), `blast_radius` (callers + callees — run before rename/delete), `propagation_checklist` (exhaustive update checklist for shared types).
 
-### ⏳ cortex_chronos
-Save/compare/rollback named AST snapshots. Detects semantic regressions that `git diff` hides.
+### 3. ⏳ cortex_chronos
+AST snapshot tool for safe refactors. Workflow: `save_checkpoint` (before edit) → edit → `compare_checkpoint` (verify). Use instead of git diff — AST-level, ignores formatting noise. Actions: `save_checkpoint`, `list_checkpoints`, `compare_checkpoint`, `delete_checkpoint`.
 
-### 🧠 cortex_memory_retriever / cortex_remember
-Global memory journal (`~/.cortexast/global_memory.jsonl`) with vector-semantic recall.
+### 4. 🛠️ run_diagnostics
+Run compiler diagnostics (cargo check / tsc / gcc). Call after any code edit to catch errors before proceeding. Returns file, line, code, message — structured for targeted fixes.
 
-### 🌐 cortex_manage_ast_languages — Self-Evolving Agent
-Download and **hot-reload Wasm parsers** at runtime. No restart required. Supports Go, PHP, C++, C#, Java, Ruby, C, and Dart.
-```json
-{ "action": "add", "languages": ["go", "php", "cpp"] }
-```
+### 5. 🧠 cortex_memory_retriever
+Search past agent decisions in global memory (semantic + keyword hybrid). **Requires CortexSync.** Call BEFORE any research or exploration — the answer may already be cached. Returns ranked entries: intent, decision, tags, files_touched.
 
-### 📋 cortex_get_rules
-Fetches and filters codebase AI rules based on context (frontend/backend/db). **Requires CortexSync**.
+### 6. 📋 cortex_get_rules
+Fetch codebase AI rules for the current context. **Requires CortexSync.** Returns merged rules filtered by file_path (frontend/backend/db context). Call before starting any task in a new project.
 
-### 🌍 cortex_list_network
-Discover all AI-tracked codebases in your machine. **Requires CortexSync**.
+### 7. ✨ cortex_remember
+Save task outcome to permanent global memory. **Requires CortexSync.** Call at END of every task. intent+decision must be ≤200 chars each. For long artifacts write a file first and pass path via heavy_artifacts.
+
+### 8. 🌍 cortex_list_network
+List all AI-tracked codebases (**Requires CortexSync** network). Use to discover `target_project` IDs for cross-project operations.
+
+### 9. 🌐 cortex_manage_ast_languages
+Manage Wasm grammar parsers for non-core languages. Core (always active): rust, typescript, python. Call `status` to see active/available languages. Call `add` with `languages[]` to download and hot-reload parsers from GitHub tree-sitter releases. Available: go, php, cpp, c, c_sharp, java, ruby, dart.
 
 ---
 
