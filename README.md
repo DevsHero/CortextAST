@@ -11,12 +11,16 @@
 
 ## What is CortexAST?
 
+> 👁️ **CortexAST is the "eyes"** — read-only code intelligence. For write/execute capabilities, see the companion [`cortex-act`](https://github.com/DevsHero/cortex-act) project (the "hands").
+
 CortexAST is a **production-grade MCP (Model Context Protocol) server** that gives AI coding agents (Claude, Gemini, GPT-4o, etc.) the ability to:
 
 - **Navigate codebases semantically** — find symbols, blast-radius analysis, cross-file propagation checklists
-- **Edit code surgically** — byte-accurate AST patching with a built-in Tree-sitter validator and Auto-Healer  
 - **Evolve itself** — download and hot-reload WebAssembly language parsers at runtime (Go, PHP, Ruby, Java, …)
-- **Run async jobs** — spawn background shell commands and poll results without MCP timeout
+- **Time-travel your codebase** — Chronos snapshot system for pre/post-refactor AST-level comparison
+- **Search local memory** — hybrid semantic + keyword search over your codebase history
+
+> ✋ To **edit files**, **run commands**, or **patch configs**, use [cortex-act](https://github.com/DevsHero/cortex-act) instead.
 
 ---
 
