@@ -512,6 +512,146 @@ impl ServerState {
                             "required": []
                         }
                     },
+                    // ── CortexAct: write / execute tools ─────────────────────────────
+                    {
+                        "name": "cortex_act_edit_ast",
+                        "description": "Replace or delete a named symbol (function/class/struct) in any source file. Targets by name, not line number. Auto-heals broken AST via local LLM if validation fails. Use cortexast map_overview to discover symbol names first.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "file": { "type": "string", "description": "Abs path to source file." },
+                                "edits": {
+                                    "type": "array",
+                                    "description": "Edits to apply (bottom-up order enforced automatically).",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "target": { "type": "string", "description": "Symbol name or 'kind:name' (e.g. 'login' or 'function:login')." },
+                                            "action": { "type": "string", "enum": ["replace", "delete"], "description": "replace: swap entire symbol body. delete: remove symbol." },
+                                            "code": { "type": "string", "description": "Full replacement source (required for replace)." }
+                                        },
+                                        "required": ["target", "action"]
+                                    }
+                                },
+                                "llm_url": { "type": "string", "description": "Auto-Healer LLM endpoint override. Default: http://127.0.0.1:1234/v1/chat/completions." }
+                            },
+                            "required": ["file", "edits"]
+                        }
+                    },
+                    {
+                        "name": "cortex_act_edit_data_graph",
+                        "description": "Surgical, comment-preserving edits for JSON, YAML, and TOML using Tree-sitter and JSONPath. Preferred over cortex_patch_file for complex nested structures.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "file": { "type": "string", "description": "Abs path to data file." },
+                                "target": { "type": "string", "description": "JSONPath-like target (e.g. '$.key[0].nested') or dot-path (e.g. 'db.host')." },
+                                "action": { "type": "string", "enum": ["set", "replace", "delete"], "description": "set/replace: update value. delete: remove entry." },
+                                "code": { "type": "string", "description": "New value as a string or JSON literal." }
+                            },
+                            "required": ["file", "target", "action"]
+                        }
+                    },
+                    {
+                        "name": "cortex_act_edit_markup",
+                        "description": "Surgical, structural edits for Markdown, HTML, and XML. Targeted by heading name, element index, or tag/id. Also handles JSON/YAML/TOML via byte-splice when tree-sitter grammars are loaded.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "file": { "type": "string", "description": "Abs path to markup file." },
+                                "target": { "type": "string", "description": "Type:Value target (e.g. 'heading:Setup', 'table:0', or dot-path for JSON/YAML/TOML)." },
+                                "action": { "type": "string", "enum": ["replace", "delete"], "description": "replace: update element. delete: remove element." },
+                                "code": { "type": "string", "description": "Full replacement content (required for replace)." }
+                            },
+                            "required": ["file", "target", "action"]
+                        }
+                    },
+                    {
+                        "name": "cortex_patch_file",
+                        "description": "Surgically patch config (JSON/YAML/TOML via dot-path), markdown docs (section heading), or .env (key). Avoids full-file rewrites. type=config: target='dependencies.serde'. type=docs: target='Installation'. type=env: target='API_KEY'.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "file": { "type": "string", "description": "Abs path to target file." },
+                                "type": { "type": "string", "enum": ["config", "docs", "env"], "description": "File type to patch." },
+                                "action": { "type": "string", "enum": ["set", "delete"], "description": "set: upsert value. delete: remove key/section." },
+                                "target": { "type": "string", "description": "Dot-path for config, heading text for docs, key name for env." },
+                                "value": { "description": "New value (required for set)." },
+                                "heading_level": { "type": "integer", "default": 2, "description": "Heading level for docs (1-4). Default 2 (##)." }
+                            },
+                            "required": ["file", "type", "action", "target"]
+                        }
+                    },
+                    {
+                        "name": "cortex_act_run_async",
+                        "description": "Run a shell command as a background job. Returns immediately with job_id. Poll with cortex_check_job. Use for long-running builds, scripts, or any command that may exceed MCP timeout.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "command": { "type": "string", "description": "Shell command to execute." },
+                                "cwd": { "type": "string", "description": "Working directory. Default: cwd." },
+                                "timeout_secs": { "type": "integer", "default": 300, "description": "Hard timeout seconds. Default 300." }
+                            },
+                            "required": ["command"]
+                        }
+                    },
+                    {
+                        "name": "cortex_check_job",
+                        "description": "Poll a background job (from cortex_act_run_async). Returns status (running/done/failed), exit code, duration_secs, and last 20 lines of output (log_tail).",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "job_id": { "type": "string", "description": "Job ID from cortex_act_run_async." }
+                            },
+                            "required": ["job_id"]
+                        }
+                    },
+                    {
+                        "name": "cortex_kill_job",
+                        "description": "Terminate a background job (SIGTERM). No-op if job already finished.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "job_id": { "type": "string", "description": "Job ID to terminate." }
+                            },
+                            "required": ["job_id"]
+                        }
+                    },
+                    {
+                        "name": "cortex_act_batch_execute",
+                        "description": "Execute an array of CortexAct operations in a single call. Each operation specifies a tool_name and its parameters. Results are collected per-operation — one failure does not abort the rest.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "operations": {
+                                    "type": "array",
+                                    "description": "Ordered list of operations to execute.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "tool_name": { "type": "string", "description": "e.g. 'cortex_act_edit_ast', 'cortex_act_edit_markup', 'cortex_patch_file'." },
+                                            "parameters": { "type": "object", "description": "Parameters for the tool (same schema as calling it directly)." }
+                                        },
+                                        "required": ["tool_name", "parameters"]
+                                    }
+                                }
+                            },
+                            "required": ["operations"]
+                        }
+                    },
+                    {
+                        "name": "cortex_act_shell_exec",
+                        "description": "Run a shell command synchronously and return stdout/stderr. Hard timeout (default 10 s). For long-running builds use cortex_act_run_async instead.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "command": { "type": "string", "description": "Shell command to run." },
+                                "cwd": { "type": "string", "description": "Working directory (optional)." },
+                                "timeout_secs": { "type": "integer", "default": 10, "description": "Hard timeout in seconds. Default 10." }
+                            },
+                            "required": ["command"]
+                        }
+                    },
                 ]  // ← end of tools array
             }
         })
@@ -1542,6 +1682,145 @@ Call cortex_chronos with action='list_checkpoints' first to see what exists.".to
                     "text": text_exts,
                 });
                 ok(serde_json::to_string_pretty(&caps).unwrap_or_default())
+            }
+
+            // ── CortexAct: write / execute tools ──────────────────────────
+
+            "cortex_act_edit_ast" => {
+                let file = match args.get("file").and_then(|v| v.as_str()) {
+                    Some(f) => f.to_owned(),
+                    None => return err("cortex_act_edit_ast: 'file' is required".to_string()),
+                };
+                let path = std::path::Path::new(&file);
+                let edits_json = args.get("edits").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let llm_url = args.get("llm_url").and_then(|v| v.as_str()).map(|s| s.to_owned());
+
+                let edits: Vec<crate::act::editor::AstEdit> = edits_json
+                    .iter()
+                    .filter_map(|e| Some(crate::act::editor::AstEdit {
+                        target: e.get("target")?.as_str()?.to_owned(),
+                        action: e.get("action").and_then(|v| v.as_str()).unwrap_or("replace").to_owned(),
+                        code:   e.get("code").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+                    }))
+                    .collect();
+
+                match crate::act::editor::apply_ast_edits(path, edits, llm_url.as_deref()) {
+                    Ok(src) => ok(format!("✅ Applied AST edits to '{file}' ({} chars)", src.len())),
+                    Err(e)  => err(format!("cortex_act_edit_ast error: {e:#}")),
+                }
+            }
+
+            "cortex_act_edit_data_graph" | "cortex_act_edit_markup" => {
+                let file = match args.get("file").and_then(|v| v.as_str()) {
+                    Some(f) => f.to_owned(),
+                    None => return err(format!("{name}: 'file' is required")),
+                };
+                let target = match args.get("target").and_then(|v| v.as_str()) {
+                    Some(t) => t.to_owned(),
+                    None => return err(format!("{name}: 'target' is required")),
+                };
+                let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("set");
+                let code = args.get("code")
+                    .or_else(|| args.get("value"))
+                    .map(|v| if v.is_string() { v.as_str().unwrap_or("").to_owned() } else { v.to_string() })
+                    .unwrap_or_default();
+
+                match crate::act::markup_patcher::patch_markup(&file, &target, action, &code) {
+                    Ok(msg)  => ok(msg),
+                    Err(e) => err(format!("{name} error: {e:#}")),
+                }
+            }
+
+            "cortex_patch_file" => {
+                let file   = match args.get("file").and_then(|v| v.as_str()) {
+                    Some(f) => f.to_owned(), None => return err("cortex_patch_file: 'file' is required".to_string()),
+                };
+                let kind   = args.get("type").and_then(|v| v.as_str()).unwrap_or("config");
+                let target = match args.get("target").and_then(|v| v.as_str()) {
+                    Some(t) => t.to_owned(), None => return err("cortex_patch_file: 'target' is required".to_string()),
+                };
+                let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("set");
+                let value  = args.get("value").cloned();
+
+                let result = match kind {
+                    "config" => crate::act::config_patcher::patch_config(&file, action, &target, value.as_ref()),
+                    "docs" => {
+                        let level = args.get("heading_level").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
+                        let content = value.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+                        crate::act::docs_patcher::patch_docs(&file, &target, content, level)
+                    }
+                    "env" => {
+                        let val = value.as_ref().and_then(|v| v.as_str());
+                        crate::act::env_patcher::patch_env(&file, action, &target, val)
+                    }
+                    other => Err(anyhow::anyhow!("Unknown cortex_patch_file type: {other}")),
+                };
+                match result {
+                    Ok(msg) => ok(msg),
+                    Err(e)  => err(format!("cortex_patch_file error: {e:#}")),
+                }
+            }
+
+            "cortex_act_run_async" => {
+                let command = match args.get("command").and_then(|v| v.as_str()) {
+                    Some(c) => c.to_owned(),
+                    None => return err("cortex_act_run_async: 'command' is required".to_string()),
+                };
+                let cwd = args.get("cwd").and_then(|v| v.as_str()).map(|s| s.to_owned());
+                let timeout = args.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(300);
+                match crate::act::job_manager::spawn_job(command, cwd, timeout) {
+                    Ok(r)  => ok(format!("🚀 job_id: {}\npid: {:?}\nlog: {}\n{}", r.job_id, r.pid, r.log_path, r.message)),
+                    Err(e) => err(format!("cortex_act_run_async error: {e:#}")),
+                }
+            }
+
+            "cortex_check_job" => {
+                let job_id = match args.get("job_id").and_then(|v| v.as_str()) {
+                    Some(j) => j.to_owned(),
+                    None => return err("cortex_check_job: 'job_id' is required".to_string()),
+                };
+                match crate::act::job_manager::check_job(&job_id) {
+                    Ok(r)  => ok(serde_json::to_string_pretty(&r).unwrap_or_else(|e| format!("serialize error: {e}"))),
+                    Err(e) => err(format!("cortex_check_job error: {e:#}")),
+                }
+            }
+
+            "cortex_kill_job" => {
+                let job_id = match args.get("job_id").and_then(|v| v.as_str()) {
+                    Some(j) => j.to_owned(),
+                    None => return err("cortex_kill_job: 'job_id' is required".to_string()),
+                };
+                match crate::act::job_manager::kill_job(&job_id) {
+                    Ok(msg) => ok(msg),
+                    Err(e)  => err(format!("cortex_kill_job error: {e:#}")),
+                }
+            }
+
+            "cortex_act_batch_execute" => {
+                let ops = match args.get("operations").and_then(|v| v.as_array()) {
+                    Some(arr) => arr.clone(),
+                    None => return err("cortex_act_batch_execute: 'operations' array is required".to_string()),
+                };
+                let results = crate::act::workflow::batch_execute(&ops);
+                ok(crate::act::workflow::format_batch_results(&results))
+            }
+
+            "cortex_act_shell_exec" => {
+                let command = match args.get("command").and_then(|v| v.as_str()) {
+                    Some(c) => c.to_owned(),
+                    None => return err("cortex_act_shell_exec: 'command' is required".to_string()),
+                };
+                let cwd     = args.get("cwd").and_then(|v| v.as_str());
+                let timeout = args.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(10);
+
+                match crate::act::workflow::shell_exec(&command, cwd, timeout) {
+                    Ok(r) => ok(format!(
+                        "exit_code: {}\nduration_ms: {}\n\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                        r.exit_code, r.duration_ms,
+                        r.stdout.trim_end(), r.stderr.trim_end()
+                    )),
+                    Err(e) => err(format!("cortex_act_shell_exec error: {e:#}")),
+                }
             }
 
             _ => err(format!("Tool not found: {name}")),

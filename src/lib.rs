@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 #[macro_export]
 macro_rules! debug_log {
 	($($arg:tt)*) => {{
