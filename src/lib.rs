@@ -11,6 +11,7 @@ macro_rules! debug_log {
 pub mod act;
 pub mod chronos;
 pub mod config;
+pub mod data_engine;
 pub mod grammar_manager;
 pub mod inspector;
 pub mod mapper;

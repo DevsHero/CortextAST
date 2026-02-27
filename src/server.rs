@@ -474,6 +474,44 @@ impl ServerState {
                             "required": ["action"]
                         }
                     },
+                    // ── Data Engine ───────────────────────────────────────────────────
+                    {
+                        "name": "cortex_data_explorer",
+                        "description": "Explore and query tabular (CSV/TSV) or plain-text (log/env/txt/md) files without loading them into the AST pipeline. Ideal for quickly previewing schemas, filtering rows, or grepping log files.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "path": {
+                                    "type": "string",
+                                    "description": "Absolute or repo-relative path to the data file."
+                                },
+                                "query": {
+                                    "type": "string",
+                                    "description": "Optional filter. For CSV/TSV: substring match against any field. For text files: substring match per line."
+                                },
+                                "max_rows": {
+                                    "type": "integer",
+                                    "description": "Max rows to show in overview (default 50).",
+                                    "default": 50
+                                },
+                                "max_chars": {
+                                    "type": "integer",
+                                    "description": "Hard output cap in characters (default 8000).",
+                                    "default": 8000
+                                }
+                            },
+                            "required": ["path"]
+                        }
+                    },
+                    {
+                        "name": "cortex_get_capabilities",
+                        "description": "List all file extensions supported by CortexAST, grouped by engine type (tree_sitter AST, data/CSV, raw text). Use this to quickly check whether a file type is supported before calling other tools.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "required": []
+                        }
+                    },
                 ]  // ← end of tools array
             }
         })
@@ -1437,6 +1475,71 @@ Call cortex_chronos with action='list_checkpoints' first to see what exists.".to
                             .to_string(),
                     ),
                 }
+            }
+
+            // ── Data Engine ──────────────────────────────────────────────────────────
+            "cortex_data_explorer" => {
+                let path_str = match args.get("path").and_then(|v| v.as_str()) {
+                    Some(p) => p.to_string(),
+                    None => return err("Missing required parameter: path".to_string()),
+                };
+                let repo_root = self.repo_root.clone().unwrap_or_else(|| std::path::PathBuf::from("."));
+                let abs_path = {
+                    let p = std::path::PathBuf::from(&path_str);
+                    if p.is_absolute() { p } else { repo_root.join(p) }
+                };
+                let query_filter = args.get("query").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let max_rows = args.get("max_rows").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+
+                let reg = crate::data_engine::registry();
+                match reg.engine_for(&abs_path) {
+                    None => err(format!(
+                        "No data engine supports this file type: {}",
+                        abs_path.extension().and_then(|e| e.to_str()).unwrap_or("(none)")
+                    )),
+                    Some(engine) => {
+                        let result = if query_filter.is_some() {
+                            engine.read_target(&abs_path, query_filter.as_deref(), max_chars)
+                        } else {
+                            engine.get_overview(&abs_path, max_rows)
+                        };
+                        match result {
+                            Ok(text) => ok(text),
+                            Err(e) => err(format!("cortex_data_explorer error: {e:#}")),
+                        }
+                    }
+                }
+            }
+
+            "cortex_get_capabilities" => {
+                use crate::inspector::exported_language_config;
+                let cfg = exported_language_config().read().unwrap();
+                let ast_langs = cfg.active_languages();
+                let mut ast_exts: Vec<String> = ast_langs
+                    .iter()
+                    .flat_map(|lang| cfg.extensions_for_language(lang))
+                    .collect();
+                ast_exts.sort();
+                ast_exts.dedup();
+
+                let reg = crate::data_engine::registry();
+                let mut data_exts: Vec<String> = Vec::new();
+                let mut text_exts: Vec<String> = Vec::new();
+                for engine in reg.engines() {
+                    let exts: Vec<String> = engine.supported_extensions().iter().map(|s| s.to_string()).collect();
+                    if engine.name() == "csv" {
+                        data_exts.extend(exts);
+                    } else {
+                        text_exts.extend(exts);
+                    }
+                }
+
+                let caps = serde_json::json!({
+                    "tree_sitter": ast_exts,
+                    "data": data_exts,
+                    "text": text_exts,
+                });
+                ok(serde_json::to_string_pretty(&caps).unwrap_or_default())
             }
 
             _ => err(format!("Tool not found: {name}")),
